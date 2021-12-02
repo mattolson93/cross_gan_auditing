@@ -22,7 +22,13 @@ from colat.generators.abstract import Generator
 module_path = Path(__file__).parent / "stylegan2-pytorch"
 sys.path.insert(1, str(module_path.resolve()))
 
+module_path = Path(__file__).parent / "stylegan2-ada"
+sys.path.insert(1, str(module_path.resolve()))
+
+#import pdb; pdb.set_trace()
+
 from model import Generator as StyleGAN2Model
+from networks import Generator as StyleGAN2Model2
 
 from colat.utils.model_utils import download_ckpt
 
@@ -35,6 +41,7 @@ class StyleGAN2Generator(Generator):
         truncation: float = 1.0,
         use_w: bool = False,
         feature_layer: str = "generator.layers.0",
+        num_ws=12,
     ):
         super(StyleGAN2Generator, self).__init__(feature_layer=feature_layer)
         self.device = device
@@ -57,11 +64,12 @@ class StyleGAN2Generator(Generator):
             "places": 256,
         }
 
-        assert (
-            self.outclass in configs
-        ), f'Invalid StyleGAN2 class {self.outclass}, should be one of [{", ".join(configs.keys())}]'
+        #assert (
+        #    self.outclass in configs
+        #), f'Invalid StyleGAN2 class {self.outclass}, should be one of [{", ".join(configs.keys())}]'
 
-        self.resolution = configs[self.outclass]
+        self.resolution = 128 if class_name not in configs else configs[self.outclass]
+        self.custom_stylegan2 = class_name not in configs
         self.name = f"StyleGAN2-{self.outclass}"
         self.has_latent_residual = True
         self.load_model()
@@ -104,15 +112,57 @@ class StyleGAN2Generator(Generator):
             / f"stylegan2/stylegan2_{self.outclass}_{self.resolution}.pt"
         )
 
-        self.model = StyleGAN2Model(self.resolution, 512, 8).to(self.device)
+        #import pdb; pdb.set_trace()
 
-        if not checkpoint.is_file():
-            os.makedirs(checkpoint.parent, exist_ok=True)
-            self.download_checkpoint(checkpoint)
+        
 
-        ckpt = torch.load(checkpoint)
-        self.model.load_state_dict(ckpt["g_ema"], strict=False)
-        self.latent_avg = ckpt["latent_avg"].to(self.device)
+
+        if self.custom_stylegan2:
+
+            ckpt = torch.load(checkpoint)['G']
+            z_dim = ckpt.z_dim
+            c_dim = ckpt.c_dim
+            w_dim = ckpt.w_dim
+            img_resolution = ckpt.img_resolution
+            img_channels = ckpt.img_channels
+
+            mapping_kwargs = {"num_layers":ckpt.mapping.num_layers, "w_avg_beta": ckpt.mapping.w_avg_beta}
+
+            synthesis_kwargs = {"conv_clamp":ckpt.synthesis.__dict__['_init_kwargs']['conv_clamp'],
+                "channel_base": ckpt.synthesis.__dict__['_init_kwargs']['channel_base']}
+            
+
+
+            self.model = StyleGAN2Model2(z_dim, c_dim, w_dim, img_resolution, img_channels, mapping_kwargs=mapping_kwargs, synthesis_kwargs=synthesis_kwargs).to(self.device)
+            self.model.load_state_dict(ckpt.state_dict(), strict=True)
+            '''if self.w_primary:
+                ws = []
+                for i in range(100):
+                    ws.append(self.sample_latent(n_samples=100))
+                #import pdb; pdb.set_trace()
+                ws = torch.cat(ws, dim=0) 
+                print(ws.mean(0)[:10])
+                print(ws.mean(0)[-10:])
+                print(ws.std(0)[:10])
+                print(ws.std(0)[-10:])
+                exit()
+            '''
+
+            #self.model = ckpt['G'].to(self.device)
+            self.model.log_size = int(np.log2(img_resolution))
+            self.latent_avg = self.model.mapping.w_avg.to(self.device)
+       
+        else:
+            self.model = StyleGAN2Model(self.resolution, 512, 8).to(self.device)
+            zz = self.model.log_size
+            if not checkpoint.is_file():
+                os.makedirs(checkpoint.parent, exist_ok=True)
+                print("you'll need to manually download the following file")
+                self.download_checkpoint(checkpoint)
+                
+            ckpt = torch.load(checkpoint)
+            self.model.load_state_dict(ckpt["g_ema"], strict=False)
+            self.latent_avg = ckpt["latent_avg"].to(self.device)
 
     def sample_latent(self, n_samples=1, seed=None, truncation=None):
         if seed is None:
@@ -130,7 +180,11 @@ class StyleGAN2Generator(Generator):
         )  # [N, 512]
 
         if self.w_primary:
-            z = self.model.style(z)
+            if self.custom_stylegan2:
+                #import pdb; pdb.set_trace()
+                z = self.model.mapping.forward_w_only(z, None)
+            else:
+                z = self.model.style(z)
 
         return z
 
@@ -144,17 +198,36 @@ class StyleGAN2Generator(Generator):
             )
 
     def forward(self, x):
-        x = x if isinstance(x, list) else [x]
-        out, _ = self.model(
-            x,
-            noise=self.noise,
-            truncation=self.truncation,
-            truncation_latent=self.latent_avg,
-            input_is_w=self.w_primary,
-        )
+        
+        x = x if isinstance(x, list) or self.custom_stylegan2 else [x]
+        if self.w_primary and self.custom_stylegan2:
+            x = self.model.mapping.forward_w_broadcast(x)
+            out = self.model.synthesis(x)
+        elif self.custom_stylegan2:
+            out = self.model(x,c=None)
+        else:
+            out, _ = self.model(
+                x,
+                noise=self.noise,
+                truncation=self.truncation,
+                truncation_latent=self.latent_avg,
+                input_is_w=self.w_primary,
+            )
         return 0.5 * (out + 1)
 
+    def custom_partial_forward(self, x, layer_name):
+        if self.w_primary:
+            return self.model.synthesis(self.model.mapping.forward_w_broadcast(x))
+
+
+        return self.model(x, c=None)
+
+
+
     def partial_forward(self, x, layer_name):
+        if self.custom_stylegan2: 
+            return self.custom_partial_forward(x, layer_name)
+
         styles = x if isinstance(x, list) else [x]
         inject_index = None
         noise = self.noise

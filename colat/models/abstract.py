@@ -15,12 +15,14 @@ class Model(ABC, torch.nn.Module):
     def __init__(
         self,
         k: int,
+        batch_k: int,
         size: int,
         alpha: Union[float, List[float]] = 0.1,
         normalize: bool = True,
     ) -> None:
         super().__init__()
         self.k = k
+        self.batch_k = batch_k
         self.size = size
         self.alpha = alpha
         self.normalize = normalize

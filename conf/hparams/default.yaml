@@ -2,6 +2,7 @@ hparams:
   batch_size: 32
   iterations: 100000
   grad_clip_max_norm: null # change to float to activate
+  overlap_k: 4
 
   optimizer:
     _target_: torch.optim.Adam

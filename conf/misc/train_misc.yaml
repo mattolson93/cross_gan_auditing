@@ -3,7 +3,7 @@ checkpoint: null
 
 tensorboard: true
 auto_cpu_if_no_gpu: true
-device: cuda:0
+device: cuda
 mixed_precision: false
 save: true
 eval_freq: 1000
@@ -14,5 +14,8 @@ hparams:
   iterations: 10000
 
 k: 32
+overlap_k: 4
+batch_k: 16
+
 feed_layers: null
-train_projector: true
+train_projector: false

@@ -175,37 +175,16 @@ class Trainer:
 
             # Apply Directions
             self.optimizer.zero_grad()
+            #import pdb; pdb.set_trace()
             z = self.model(z)
 
-            # Forward
-            features = []
-            for j in range(z.shape[0] // self.batch_size):
-                # Prepare batch
-                start, end = j * self.batch_size, (j + 1) * self.batch_size
-                z_batch = z[start:end, ...]
+            # Get features
+            feats = self.generator.get_features(z)
+            feats = self.projector(feats)
 
-                # Manipulate only asked layers
-                if self.feed_layers is not None:
-                    n_latent = self.generator.n_latent()
-
-                    z_batch_layers = []
-                    for i in range(n_latent):
-                        if i in self.feed_layers:
-                            z_batch_layers.append(z_batch)
-                        else:
-                            z_batch_layers.append(z_orig)
-                    z_batch = z_batch_layers
-
-                # Get features
-                feats = self.generator.get_features(z_batch)
-                feats = self.projector(feats)
-
-                # Take feature divergence
-                feats = feats - orig_feats
-                feats = feats / torch.reshape(torch.norm(feats, dim=1), (-1, 1))
-
-                features.append(feats)
-            features = torch.cat(features, dim=0)
+            # Take feature divergence
+            feats = feats - orig_feats.repeat(self.model.batch_k,1)
+            features = feats / torch.reshape(torch.norm(feats, dim=1), (-1, 1))
 
             # Loss
             acc, loss = self.loss_fn(features)
@@ -259,7 +238,7 @@ class Trainer:
             with autocast():
                 # Original features
                 with torch.no_grad():
-                    orig_feats = self.generator.get_features(z)
+                    orig_feats = self.generator.get_features(z)#
                     orig_feats = self.projector(orig_feats)
 
                 # Apply Directions

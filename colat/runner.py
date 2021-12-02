@@ -22,10 +22,12 @@ def train(cfg: DictConfig) -> None:
     # Device
     device = get_device(cfg)
 
+    #import pdb; pdb.set_trace()
     # Model
     # Use Hydra's instantiation to initialize directly from the config file
-    model: torch.nn.Module = instantiate(cfg.model, k=cfg.k).to(device)
-    loss_fn: torch.nn.Module = instantiate(cfg.loss, k=cfg.k).to(device)
+    #size = cfg.model.size if not cfg.generator.use_w else cfg.model.size * cfg.generator.num_ws
+    model: torch.nn.Module = instantiate(cfg.model, k=cfg.k, batch_k=cfg.batch_k).to(device)
+    loss_fn: torch.nn.Module = instantiate(cfg.loss, k=min(cfg.batch_k, cfg.k)).to(device)
     generator: torch.nn.Module = instantiate(cfg.generator).to(device)
     projector: Projector = instantiate(cfg.projector).to(device)
 
@@ -123,9 +125,11 @@ def generate(cfg: DictConfig) -> None:
     """
     # Device
     device = get_device(cfg)
+    #import pdb; pdb.set_trace()
+    cfg.n_dirs = list(range(cfg.k))
 
     # Model
-    model: torch.nn.Module = instantiate(cfg.model, k=cfg.k).to(device)
+    model: torch.nn.Module = instantiate(cfg.model, k=cfg.k, batch_k=cfg.batch_k).to(device)
     generator: torch.nn.Module = instantiate(cfg.generator).to(device)
     projector: torch.nn.Module = instantiate(cfg.projector).to(device)
 

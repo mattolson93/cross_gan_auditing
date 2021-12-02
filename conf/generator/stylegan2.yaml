@@ -5,3 +5,4 @@ truncation: 0.7
 class_name: ffhq
 use_w: true
 feature_layer: conv1
+num_ws: 12

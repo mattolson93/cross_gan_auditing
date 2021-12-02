@@ -1,0 +1,13 @@
+defaults:
+  - model: global
+  - loss: contrastive2
+  - generator: biggan
+  - projector: identity
+  - generator2: biggan
+    optional: true
+  - model2: global
+  - hparams: default # change when Hydra 1.1 releases
+  - misc: train_misc
+  - size: ${defaults.2.generator}_${defaults.3.projector} # change when Hydra 1.1 releases
+  - hydra/job_logging: custom
+  - hydra/output: custom2
