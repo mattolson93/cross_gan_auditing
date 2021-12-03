@@ -248,6 +248,45 @@ class MappingNetwork(torch.nn.Module):
                     x[:, :truncation_cutoff] = self.w_avg.lerp(x[:, :truncation_cutoff], truncation_psi)
         return x
 
+    def forward_w_only(self, z, c, truncation_psi=1, truncation_cutoff=None, skip_w_avg_update=False):
+        # Embed, normalize, and concat inputs.
+        x = None
+        with torch.autograd.profiler.record_function('input'):
+            if self.z_dim > 0:
+                misc.assert_shape(z, [None, self.z_dim])
+                x = normalize_2nd_moment(z.to(torch.float32))
+            if self.c_dim > 0:
+                misc.assert_shape(c, [None, self.c_dim])
+                y = normalize_2nd_moment(self.embed(c.to(torch.float32)))
+                x = torch.cat([x, y], dim=1) if x is not None else y
+
+        # Main layers.
+        for idx in range(self.num_layers):
+            layer = getattr(self, f'fc{idx}')
+            x = layer(x)
+
+        # Update moving average of W.
+        if self.w_avg_beta is not None and self.training and not skip_w_avg_update:
+            with torch.autograd.profiler.record_function('update_w_avg'):
+                self.w_avg.copy_(x.detach().mean(dim=0).lerp(self.w_avg, self.w_avg_beta))
+
+        return x
+    def forward_w_broadcast(self, x, truncation_psi=1, truncation_cutoff=None, skip_w_avg_update=False):
+        # Broadcast.
+        if self.num_ws is not None:
+            with torch.autograd.profiler.record_function('broadcast'):
+                x = x.unsqueeze(1).repeat([1, self.num_ws, 1])
+
+        # Apply truncation.
+        if truncation_psi != 1:
+            with torch.autograd.profiler.record_function('truncate'):
+                assert self.w_avg_beta is not None
+                if self.num_ws is None or truncation_cutoff is None:
+                    x = self.w_avg.lerp(x, truncation_psi)
+                else:
+                    x[:, :truncation_cutoff] = self.w_avg.lerp(x[:, :truncation_cutoff], truncation_psi)
+        return x
+
 #----------------------------------------------------------------------------
 
 @persistence.persistent_class

@@ -26,9 +26,10 @@ class Model(ABC, torch.nn.Module):
         self.size = size
         self.alpha = alpha
         self.normalize = normalize
+        self.selected_k = None
 
     @abstractmethod
-    def forward(self, z: torch.Tensor) -> torch.Tensor:
+    def forward(self, z: torch.Tensor, selected_k=None) -> torch.Tensor:
         raise NotImplementedError
 
     @abstractmethod

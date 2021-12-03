@@ -117,7 +117,7 @@ class Trainer:
         self.val_acc_metric = LossMetric()
         self.val_loss_metric = LossMetric()
 
-        self.att_classifier = AttClsModel("resnet18").cuda().eval()
+        #self.att_classifier = AttClsModel("resnet18").cuda().eval()
         #self.att_classifier.load_state_dict(torch.load('/usr/WS2/olson60/research/latentclr/att_classifier.pt'))
         self.multi_gpu = True
         # Best
@@ -191,7 +191,6 @@ class Trainer:
 
         #import pdb; pdb.set_trace()
         for i in range(iterations):
-            #if i > 5: break
             # To device
             #z = self.wrapped_generator("sample_latent",self.batch_size)
             z1 = self.generator.sample_latent(self.batch_size).to(self.device)
@@ -214,43 +213,22 @@ class Trainer:
             # Apply Directions
             self.optimizer.zero_grad()
             z1 = self.model(z1)
-            z2 = self.model2(z2)
+            z2 = self.model2(z2,self.model.selected_k)
 
 
             # Forward
             features_1_2_list = []
             
             for generator, z, orig_feats in zip([self.generator, self.generator2], [z1,z2],[orig_feats1,orig_feats2]):
-                features = []
-                for j in range(z.shape[0] // self.batch_size):
-                    # Prepare batch
-                    start, end = j * self.batch_size, (j + 1) * self.batch_size
-                    z_batch = z[start:end, ...]
+               
+                feats = generator.get_features(z)
+                feats = self.projector(feats)
 
-                    # Manipulate only asked layers
-                    if self.feed_layers is not None:
-                        #n_latent = self.wrapped_generator("n_latent")
-                        n_latent = generator.n_latent()
+                # Take feature divergence
+                feats = feats - orig_feats.repeat(self.model.batch_k,1)
+                features = feats / torch.reshape(torch.norm(feats, dim=1), (-1, 1))
 
-                        z_batch_layers = []
-                        for i in range(n_latent):
-                            if i in self.feed_layers:
-                                z_batch_layers.append(z_batch)
-                            else:
-                                z_batch_layers.append(z_orig)
-                        z_batch = z_batch_layers
-
-                    # Get features
-                    feats = generator.get_features(z_batch)
-                    feats = self.projector(feats)
-                    #
-
-                    # Take feature divergence
-                    feats = feats - orig_feats
-                    feats = feats / torch.reshape(torch.norm(feats, dim=1), (-1, 1))
-
-                    features.append(feats)
-                features_1_2_list.append(torch.cat(features, dim=0))
+                features_1_2_list.append(features)
 
             #import pdb; pdb.set_trace()
             # Loss
@@ -370,7 +348,7 @@ class Trainer:
             )
 
         pbar.close()
-
+    @torch.no_grad()
     def _val_loop(self, epoch: int, iterations: int) -> None:
         """
         Standard validation loop
@@ -390,37 +368,43 @@ class Trainer:
 
         # Loop
         for i in range(iterations):
-            with torch.no_grad():
                 # To device
-                z = self.generator.sample_latent(self.batch_size)
-                z = z.to(self.device)
+                z1 = self.generator.sample_latent(self.batch_size).to(self.device)
+                z1_orig = z1
+
+                z2 = self.generator2.sample_latent(self.batch_size).to(self.device)
+                z2_orig = z2
+
+                
 
                 # Original features
-                orig_feats = self.generator.get_features(z)
-                orig_feats = self.projector(orig_feats)
+                with torch.no_grad():
+                    orig_feats1 = self.generator.get_features(z1)
+                    orig_feats1 = self.projector(orig_feats1)
+
+                    orig_feats2 = self.generator2.get_features(z2)
+                    orig_feats2 = self.projector(orig_feats2)
+                    #orig_feats = self.att_classifier(orig_feats)
 
                 # Apply Directions
-                z = self.model(z)
+                z1 = self.model(z1)
+                z2 = self.model2(z2)
+
 
                 # Forward
-                features = []
-                for j in range(z.shape[0] // self.batch_size):
-                    # Prepare batch
-                    start, end = j * self.batch_size, (j + 1) * self.batch_size
-
-                    # Get features
-                    feats = self.generator.get_features(z[start:end, ...])
+                features_1_2_list = []
+                for generator, z, orig_feats in zip([self.generator, self.generator2], [z1,z2],[orig_feats1,orig_feats2]):
+                    feats = generator.get_features(z)
                     feats = self.projector(feats)
 
                     # Take feature divergence
-                    feats = feats - orig_feats
-                    feats = feats / torch.reshape(torch.norm(feats, dim=1), (-1, 1))
+                    feats = feats - orig_feats.repeat(self.model.batch_k,1)
+                    features = feats / torch.reshape(torch.norm(feats, dim=1), (-1, 1))
 
-                    features.append(feats)
-                features = torch.cat(features, dim=0)
+                    features_1_2_list.append(features)
 
-                # Loss
-                acc, loss = self.loss_fn(features)
+                acc, loss = self.loss_fn(torch.cat([features_1_2_list[0],features_1_2_list[1]]), self.overlap_k)
+            
                 self.val_acc_metric.update(acc.item(), z.shape[0])
                 self.val_loss_metric.update(loss.item(), z.shape[0])
 

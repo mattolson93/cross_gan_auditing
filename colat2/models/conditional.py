@@ -10,6 +10,7 @@ class LinearConditional(Model):
     def __init__(
         self,
         k: int,
+        batch_k: int,
         size: int,
         alpha: float = 0.1,
         normalize: bool = True,
@@ -19,6 +20,8 @@ class LinearConditional(Model):
         super().__init__(k=k, size=size, alpha=alpha, normalize=normalize)
         self.k = k
         self.size = size
+        self.batch_k = min(batch_k, k)
+        self.selected_k = None
 
         # make mlp net
         self.nets = torch.nn.ModuleList()
@@ -35,12 +38,12 @@ class LinearConditional(Model):
             )
             self.nets.append(net)
 
-    def forward(self, z: torch.Tensor) -> torch.Tensor:
+    def forward(self, z: torch.Tensor, selected_k=None) -> torch.Tensor:
         #  apply all directions to each batch element
         z = torch.reshape(z, [1, -1, self.size])
         z = z.repeat(
             (
-                self.k,
+                self.batch_k,
                 1,
                 1,
             )
@@ -48,7 +51,10 @@ class LinearConditional(Model):
 
         # calculate directions
         dz = []
-        for i in range(self.k):
+        selected_k = torch.randperm(self.k)[:self.batch_k] if selected_k is None else selected_k
+        self.selected_k = selected_k
+
+        for i in selected_k:
             res_dz = self.nets[i](z[i, ...])
             res_dz = self.post_process(res_dz)
             dz.append(res_dz)
@@ -64,12 +70,13 @@ class LinearConditional(Model):
         return z + self.post_process(self.nets[k](z))
 
 
-class NonlinearConditional(Model):
+class NonlinearConditional(Model, selected_k=None):
     """K directions nonlinearly conditional on latent code"""
 
     def __init__(
         self,
         k: int,
+        batch_k: int,
         size: int,
         depth: int,
         alpha: float = 0.1,
@@ -81,6 +88,8 @@ class NonlinearConditional(Model):
         super().__init__(k=k, size=size, alpha=alpha, normalize=normalize)
         self.k = k
         self.size = size
+        self.batch_k = min(batch_k, k)
+        self.selected_k = None
 
         # make mlp net
         self.nets = torch.nn.ModuleList()
@@ -97,20 +106,22 @@ class NonlinearConditional(Model):
             )
             self.nets.append(net)
 
-    def forward(self, z: torch.Tensor) -> torch.Tensor:
+    def forward(self, z: torch.Tensor, selected_k=None) -> torch.Tensor:
         #  apply all directions to each batch element
         z = torch.reshape(z, [1, -1, self.size])
         z = z.repeat(
             (
-                self.k,
+                self.batch_k,
                 1,
                 1,
             )
         )
 
         #  calculate directions
+        selected_k = torch.randperm(self.k)[:self.batch_k] if selected_k is None else selected_k
+        self.selected_k = selected_k
         dz = []
-        for i in range(self.k):
+        for i in selected_k:
             res_dz = self.nets[i](z[i, ...])
             res_dz = self.post_process(res_dz)
             dz.append(res_dz)

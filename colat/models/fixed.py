@@ -59,8 +59,10 @@ class Fixed(Model):
         self.batch_k = min(batch_k, k)
         self.size = size
         self.params = torch.nn.Parameter(torch.randn(k, size))
+        self.selected_k = None
 
-    def forward(self, z: torch.Tensor) -> torch.Tensor:
+
+    def forward(self, z: torch.Tensor, selected_k=None) -> torch.Tensor:
         #  apply all directions to each batch element
         #[bs,size]
         z = torch.reshape(z, [1, -1, self.size])
@@ -75,10 +77,11 @@ class Fixed(Model):
         #[batch_k, batch, size]
 
         #  add directions
-        selected_k = torch.randperm(self.k)[:self.batch_k]
+        selected_k = torch.randperm(self.k)[:self.batch_k] if selected_k is None else selected_k
         all_directions = torch.reshape(self.post_process(self.params[selected_k]), (self.batch_k, 1, self.size))
         z += all_directions
 
+        self.selected_k = selected_k
         # reshape
         return torch.reshape(z, [-1, self.size])
 

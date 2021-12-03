@@ -24,16 +24,14 @@ def train(cfg: DictConfig) -> None:
     # Device
     device = get_device(cfg)
 
-    size1 = cfg.model.size if not cfg.generator.use_w else cfg.model.size * cfg.generator.num_ws
-    #size2 = cfg.model2.size if not cfg.generator2.use_w else cfg.model2.size * cfg.generator2.num_ws
     
     # Model
     # Use Hydra's instantiation to initialize directly from the config file
-    model: torch.nn.Module = instantiate(cfg.model, size=size1, k=cfg.k).to(device)
+    model: torch.nn.Module = instantiate(cfg.model, k=cfg.k, batch_k=cfg.batch_k).to(device)
     model2: torch.nn.Module = copy.deepcopy(model) #instantiate(cfg.model, k=cfg.k).to(device)
-    loss_fn: torch.nn.Module = instantiate(cfg.loss, k=cfg.k).to(device)
+    loss_fn: torch.nn.Module = instantiate(cfg.loss, k=min(cfg.batch_k, cfg.k)).to(device)
     generator: torch.nn.Module = instantiate(cfg.generator).to(device)
-    generator2: torch.nn.Module = instantiate(cfg.generator2).to(device) if cfg.generator2 is not None else None
+    generator2: torch.nn.Module = instantiate(cfg.generator2).to(device)
     projector: Projector = instantiate(cfg.projector).to(device)
 
 
@@ -137,12 +135,11 @@ def generate(cfg: DictConfig) -> None:
     """
     # Device
     device = get_device(cfg)
-    size1 = cfg.model.size if not cfg.generator.use_w else cfg.model.size * cfg.generator.num_ws
-    #size2 = cfg.model2.size if not cfg.generator2.use_w else cfg.model2.size * cfg.generator2.num_ws
+    cfg.n_dirs = list(range(cfg.k))
     
     # Model
     # Use Hydra's instantiation to initialize directly from the config file
-    model: torch.nn.Module = instantiate(cfg.model, size=size1, k=cfg.k).to(device)
+    model: torch.nn.Module = instantiate(cfg.model, k=cfg.k, batch_k=cfg.batch_k).to(device)
     model2: torch.nn.Module = copy.deepcopy(model) #instantiate(cfg.model, k=cfg.k).to(device)
     generator: torch.nn.Module = instantiate(cfg.generator).to(device)
     generator2: torch.nn.Module = instantiate(cfg.generator2).to(device)
