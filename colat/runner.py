@@ -82,6 +82,21 @@ def train(cfg: DictConfig) -> None:
     # Launch training process
     trainer.train()
 
+    cfg.n_dirs = list(range(cfg.k))
+    visualizer = Visualizer(
+        model=model,
+        generator=generator,
+        projector=projector,
+        device=device,
+        n_samples=cfg.n_samples,
+        n_dirs=cfg.n_dirs,
+        alphas=cfg.alphas,
+        iterative=cfg.iterative,
+        feed_layers=cfg.feed_layers,
+        image_size=cfg.image_size,
+    )
+    visualizer.visualize()
+
 
 def evaluate(cfg: DictConfig) -> None:
     """Evaluates model from config
@@ -138,6 +153,10 @@ def generate(cfg: DictConfig) -> None:
     checkpoint = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(checkpoint["model"])
     projector.load_state_dict(checkpoint["projector"])
+
+    #import pdb; pdb.set_trace()
+    #from sklearn.metrics.pairwise import cosine_similarity as cos
+    #cos(model.state_dict()['params'].cpu().numpy())
 
     visualizer = Visualizer(
         model=model,

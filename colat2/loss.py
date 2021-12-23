@@ -47,25 +47,35 @@ class ContrastiveLoss(nn.Module):
 
         # mask for pairs
         mask = torch.zeros((n_samples, n_samples), device=sim.device).bool()
-        for i in range(k2):
-            start, end = i * (n_samples // k2), (i + 1) * (n_samples // k2)
-            mask[start:end, start:end] = 1
-            if i < overlap_inds:
-                mask[start+feats2_start:end+feats2_start, start:end] = 1
-                mask[start:end, start+feats2_start:end+feats2_start] = 1
+        for i, is_overlap in enumerate(overlap_inds):
+            start1, end1 = i * (n_samples // k2), (i + 1) * (n_samples // k2)
+            mask[start1:end1, start1:end1] = 1
+
+            start2, end2 = start1 + feats2_start , end1 + feats2_start
+            mask[start2:end2, start2:end2] = 1
+
+            if is_overlap:
+                mask[start1:end1, start2:end2] = 1
+                mask[start2:end2, start1:end1] = 1
+
 
 
         #print("here")
+        #import pdb; pdb.set_trace()
 
         diag_mask = ~(torch.eye(n_samples, device=sim.device).bool())
 
         # pos and neg similarity and remove self similarity for pos
-        pos = sim.masked_select(mask * diag_mask).view(n_samples, -1)
-        neg = sim.masked_select(~mask).view(n_samples, -1)
+        #pos = sim.masked_select(mask * diag_mask).view(n_samples, -1)
+        #neg = sim.masked_select(~mask).view(n_samples, -1)
+        pos_mask = mask * diag_mask 
+        neg_mask = (~mask)
+        pos = sim * pos_mask
+        neg = sim * neg_mask 
 
         if self.reduce == "mean":
-            pos = pos.mean(dim=-1)
-            neg = neg.mean(dim=-1)
+            pos = pos.sum(dim=-1) / pos_mask.sum(-1)
+            neg = neg.sum(dim=-1) / neg_mask.sum(-1)
         elif self.reduce == "sum":
             pos = pos.sum(dim=-1)
             neg = neg.sum(dim=-1)
@@ -73,5 +83,5 @@ class ContrastiveLoss(nn.Module):
             raise ValueError("Only mean and sum is supported for reduce method")
 
         acc = (pos > neg).float().mean()
-        loss = -torch.log(pos / neg).mean()
+        loss = -torch.log(pos / neg).sum()
         return acc, loss

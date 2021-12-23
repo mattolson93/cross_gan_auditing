@@ -113,7 +113,7 @@ class Trainer:
 
         epoch = 0
         iteration = self.start_iteration
-        while iteration < self.iterations:
+        while iteration < self.iterations + 1:
             if iteration + self.eval_freq < self.iterations:
                 num_iters = self.eval_freq
             else:
@@ -288,7 +288,7 @@ class Trainer:
             # Update progress bar
             pbar.update()
             pbar.set_postfix_str(
-                f"Acc: {acc.item():.3f} Loss: {loss.item():.3f}", refresh=False
+                f"Acc: {acc.item():.3f} Loss: {loss.item():.3f} ", refresh=False
             )
 
         pbar.close()

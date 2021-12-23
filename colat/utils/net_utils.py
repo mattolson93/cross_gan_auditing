@@ -57,6 +57,8 @@ class AttClsModel(torch.nn.Module):
 
     def forward(self, input, labels=None):
         x = self.backbone_forward(input)
+        #import pdb; pdb.set_trace()
+        #x = self.backbone.avgpool(x)
         x = torch.flatten(x, 1)
         #x = self.dropout(x)
         #x = self.fc(x)

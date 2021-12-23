@@ -45,10 +45,10 @@ class Trainer:
         projector: torch.nn.Module,
         batch_size: int,
         iterations: int,
+        overlap_k: int,
         device: torch.device,
         eval_freq: int = 1000,
         eval_iters: int = 100,
-        overlap_k: int = 4,
         scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
         grad_clip_max_norm: Optional[float] = None,
         writer: Optional[SummaryWriter] = None,
@@ -100,6 +100,7 @@ class Trainer:
         self.batch_size = batch_size
         self.iterations = iterations
         self.start_iteration = 0
+        self.cur_iter = 0
 
         # Floating-point precision
         self.mixed_precision = (
@@ -130,6 +131,8 @@ class Trainer:
 
         epoch = 0
         iteration = self.start_iteration
+        self._val_loop(epoch, 0)
+
         while iteration < self.iterations:
             if iteration + self.eval_freq < self.iterations:
                 num_iters = self.eval_freq
@@ -143,8 +146,6 @@ class Trainer:
                 self._train_loop(epoch, num_iters)
 
             self._val_loop(epoch, self.eval_iters)
-            self.val_acc_metric.update(iteration, 4)
-            self.val_loss_metric.update(-iteration, 4)
 
             epoch_time = time.time() - start_epoch_time
             self._end_loop(epoch, epoch_time, iteration)
@@ -204,42 +205,42 @@ class Trainer:
             # Original features
             with torch.no_grad():
                 orig_feats1 = self.generator.get_features(z1)
-                orig_feats1 = self.projector(orig_feats1)
+                orig_feats1 = self.projector(orig_feats1, which_cnn=1)
 
                 orig_feats2 = self.generator2.get_features(z2)
-                orig_feats2 = self.projector(orig_feats2)
+                orig_feats2 = self.projector(orig_feats2, which_cnn=2)
                 #orig_feats = self.att_classifier(orig_feats)
 
             # Apply Directions
             self.optimizer.zero_grad()
-            z1 = self.model(z1)
-            z2 = self.model2(z2,self.model.selected_k)
 
 
             # Forward
-            features_1_2_list = []
-            
-            for generator, z, orig_feats in zip([self.generator, self.generator2], [z1,z2],[orig_feats1,orig_feats2]):
-               
-                feats = generator.get_features(z)
-                feats = self.projector(feats)
+            z1 = self.model(z1)
+            feats1 = self.projector(self.generator.get_features(z1), which_cnn=1)
+            # Take feature divergence
+            feats1 = feats1 - orig_feats1.repeat(self.model.batch_k,1)
+            features1 = feats1 / torch.reshape(torch.norm(feats1, dim=1), (-1, 1))
 
-                # Take feature divergence
-                feats = feats - orig_feats.repeat(self.model.batch_k,1)
-                features = feats / torch.reshape(torch.norm(feats, dim=1), (-1, 1))
 
-                features_1_2_list.append(features)
+            z2 = self.model2(z2,self.model.selected_k)
+            feats2 = self.projector(self.generator.get_features(z2), which_cnn=2)
+
+            # Take feature divergence
+            feats2 = feats2 - orig_feats2.repeat(self.model.batch_k,1)
+            features2 = feats2 / torch.reshape(torch.norm(feats2, dim=1), (-1, 1))
+
 
             #import pdb; pdb.set_trace()
             # Loss
-            #overlap_size = self.overlap_k *self.batch_size
-            #overlap_feats = torch.zeros(( overlap_size* 2, features1.shape[1]))
-            #overlap_feats[0::2] = features1[:overlap_size]
-            #overlap_feats[1::2] = features2[:overlap_size]
+            
+            both_feats = torch.cat([features1,features2])
+            acc, loss = self.loss_fn(both_feats, self.model.selected_k < self.overlap_k)
+            
 
-            acc, loss = self.loss_fn(torch.cat([features_1_2_list[0],features_1_2_list[1]]), self.overlap_k)
-            #acc2, loss_unique1 = self.loss_fn(features1[overlap_size:])
-            #acc3, loss_unique2 = self.loss_fn(features2[overlap_size:])
+            self.writer.add_scalar("cur_acc", acc.item(), self.cur_iter)
+            self.writer.add_scalar("cur_loss", loss.item(), self.cur_iter)
+            self.cur_iter+=1
 
             #acc = acc1+acc2+acc3
             #loss = loss_overlap + loss_unique1 + loss_unique2
@@ -254,13 +255,13 @@ class Trainer:
             self.scheduler.step()
 
             # Update metrics
-            self.train_acc_metric.update(acc.item(), z.shape[0])
-            self.train_loss_metric.update(loss.item(), z.shape[0])
+            self.train_acc_metric.update(acc.item(), z1.shape[0])
+            self.train_loss_metric.update(loss.item(), z1.shape[0])
 
             # Update progress bar
             pbar.update()
             pbar.set_postfix_str(
-                f"Acc: {acc.item():.3f} Loss: {loss.item():.3f}", refresh=False
+                f"Acc: {acc.item():.3f} Loss: {loss.item():.3f} ", refresh=False
             )
 
         pbar.close()
@@ -380,22 +381,22 @@ class Trainer:
                 # Original features
                 with torch.no_grad():
                     orig_feats1 = self.generator.get_features(z1)
-                    orig_feats1 = self.projector(orig_feats1)
+                    orig_feats1 = self.projector(orig_feats1, which_cnn=1)
 
                     orig_feats2 = self.generator2.get_features(z2)
-                    orig_feats2 = self.projector(orig_feats2)
+                    orig_feats2 = self.projector(orig_feats2, which_cnn=2)
                     #orig_feats = self.att_classifier(orig_feats)
 
                 # Apply Directions
                 z1 = self.model(z1)
-                z2 = self.model2(z2)
+                z2 = self.model2(z2,self.model.selected_k)
 
 
                 # Forward
                 features_1_2_list = []
-                for generator, z, orig_feats in zip([self.generator, self.generator2], [z1,z2],[orig_feats1,orig_feats2]):
+                for generator, z, orig_feats,which_cnn in zip([self.generator, self.generator2], [z1,z2],[orig_feats1,orig_feats2],[1,2]):
                     feats = generator.get_features(z)
-                    feats = self.projector(feats)
+                    feats = self.projector(feats, which_cnn=which_cnn)
 
                     # Take feature divergence
                     feats = feats - orig_feats.repeat(self.model.batch_k,1)
@@ -403,7 +404,7 @@ class Trainer:
 
                     features_1_2_list.append(features)
 
-                acc, loss = self.loss_fn(torch.cat([features_1_2_list[0],features_1_2_list[1]]), self.overlap_k)
+                acc, loss = self.loss_fn(torch.cat([features_1_2_list[0],features_1_2_list[1]]), self.model.selected_k < self.overlap_k)
             
                 self.val_acc_metric.update(acc.item(), z.shape[0])
                 self.val_loss_metric.update(loss.item(), z.shape[0])
@@ -462,7 +463,7 @@ class Trainer:
             "iteration": iteration + 1,
             "optimizer": self.optimizer.state_dict(),
             "model": self.model.state_dict(),
-            "model2": self.model2.state_dict() if self.model2 is not None else None,
+            "model2": self.model2.state_dict() ,
             "projector": self.projector.state_dict(),
             "scheduler": self.scheduler.state_dict()
             if self.scheduler is not None
@@ -474,6 +475,7 @@ class Trainer:
     def _load_from_checkpoint(self, checkpoint_path: str) -> None:
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
         self.model.load_state_dict(checkpoint["model"])
+        self.model2.load_state_dict(checkpoint["model2"])
         self.projector.load_state_dict(checkpoint["projector"])
         self.optimizer.load_state_dict(checkpoint["optimizer"])
 

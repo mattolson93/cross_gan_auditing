@@ -59,7 +59,7 @@ class Fixed(Model):
         self.k = k
         self.batch_k = min(batch_k, k)
         self.size = size
-        self.params = torch.nn.Parameter(torch.randn(k, size))
+        self.params = torch.nn.Parameter(torch.ones(k, size))
         self.selected_k = None
 
 

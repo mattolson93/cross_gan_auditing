@@ -34,12 +34,11 @@ def train(cfg: DictConfig) -> None:
     generator2: torch.nn.Module = instantiate(cfg.generator2).to(device)
     projector: Projector = instantiate(cfg.projector).to(device)
 
-
     optimizer: torch.optim.Optimizer = instantiate(
         cfg.hparams.optimizer,
-        list(model.parameters()) + list(projector.parameters())
+        list(model.parameters()) + list(model2.parameters()) + list(projector.parameters())
         if cfg.train_projector
-        else model.parameters(),
+        else list(model.parameters()) + list(model2.parameters()),
     )
     scheduler = instantiate(cfg.hparams.scheduler, optimizer)
 
@@ -72,7 +71,7 @@ def train(cfg: DictConfig) -> None:
         projector=projector,
         batch_size=cfg.hparams.batch_size,
         iterations=cfg.hparams.iterations,
-        overlap_k=cfg.hparams.overlap_k,
+        overlap_k=cfg.overlap_k,
         device=device,
         eval_freq=cfg.eval_freq,
         eval_iters=cfg.eval_iters,
@@ -88,6 +87,39 @@ def train(cfg: DictConfig) -> None:
 
     # Launch training process
     trainer.train()
+
+    cfg.n_dirs = list(range(cfg.k))
+    #import pdb; pdb.set_trace()
+    visualizer = Visualizer(
+        model=model,
+        generator=generator,
+        projector=projector,
+        device=device,
+        n_samples=cfg.n_samples,
+        n_dirs=cfg.n_dirs,
+        alphas=cfg.alphas,
+        iterative=cfg.iterative,
+        feed_layers=cfg.feed_layers,
+        image_size=cfg.image_size,
+        gen_ind=1,
+    )
+    visualizer.visualize()
+
+
+    visualizer2 = Visualizer(
+        model=model2,
+        generator=generator2,
+        projector=projector,
+        device=device,
+        n_samples=cfg.n_samples,
+        n_dirs=cfg.n_dirs,
+        alphas=cfg.alphas,
+        iterative=cfg.iterative,
+        feed_layers=cfg.feed_layers,
+        image_size=cfg.image_size,
+        gen_ind=2,
+    )
+    visualizer2.visualize()
 
 
 def evaluate(cfg: DictConfig) -> None:
@@ -151,6 +183,10 @@ def generate(cfg: DictConfig) -> None:
     model.load_state_dict(checkpoint["model"])
     model2.load_state_dict(checkpoint["model2"])
     projector.load_state_dict(checkpoint["projector"])
+
+    #import pdb; pdb.set_trace()
+    #from sklearn.metrics.pairwise import cosine_similarity as cos
+    #cos(model.state_dict()['params'].cpu().numpy())
 
     visualizer = Visualizer(
         model=model,

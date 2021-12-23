@@ -13,9 +13,15 @@ hparams:
   batch_size: 32
   iterations: 10000
 
-k: 32
+k: 32 
 overlap_k: 4
 batch_k: 16
 
 feed_layers: null
 train_projector: false
+
+n_samples: 5 
+n_dirs: -1
+alphas: [1,2,3,6,10, 15]
+iterative: False 
+image_size: 128

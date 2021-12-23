@@ -181,7 +181,8 @@ class StyleGAN2Generator(Generator):
 
         if self.w_primary:
             if self.custom_stylegan2:
-                z = self.model.mapping(z, None).view(z.shape[0], -1)
+                #import pdb; pdb.set_trace()
+                z = self.model.mapping.forward_w_only(z, None)
             else:
                 z = self.model.style(z)
 
@@ -199,24 +200,33 @@ class StyleGAN2Generator(Generator):
     def forward(self, x):
         
         x = x if isinstance(x, list) or self.custom_stylegan2 else [x]
-        out, _ = self.model(
-            x,
-            noise=self.noise,
-            truncation=self.truncation,
-            truncation_latent=self.latent_avg,
-            input_is_w=self.w_primary,
-        )
+        if self.w_primary and self.custom_stylegan2:
+            x = self.model.mapping.forward_w_broadcast(x)
+            out = self.model.synthesis(x)
+        elif self.custom_stylegan2:
+            out = self.model(x,c=None)
+        else:
+            out, _ = self.model(
+                x,
+                noise=self.noise,
+                truncation=self.truncation,
+                truncation_latent=self.latent_avg,
+                input_is_w=self.w_primary,
+            )
         return 0.5 * (out + 1)
 
     def custom_partial_forward(self, x, layer_name):
-        if not self.w_primary: 
-            return self.model(x, c=None)
+        if self.w_primary:
+            return self.model.synthesis(self.model.mapping.forward_w_broadcast(x), block_out=layer_name)
 
-        return self.model.synthesis(x.view(-1, self.model.num_ws, self.model.w_dim))
+
+        return self.model(x, c=None, block_out=layer_name)
+
 
 
     def partial_forward(self, x, layer_name):
-        if self.custom_stylegan2: return self.custom_partial_forward(x, layer_name)
+        if self.custom_stylegan2: 
+            return self.custom_partial_forward(x, layer_name)
 
         styles = x if isinstance(x, list) else [x]
         inject_index = None
@@ -281,7 +291,7 @@ class StyleGAN2Generator(Generator):
 
             skip = to_rgb(out, latent[:, i + 2], skip)
             if f"to_rgbs.{i//2}" in layer_name:
-                return out
+                return skip
 
             i += 2
             noise_i += 2

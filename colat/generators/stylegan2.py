@@ -216,11 +216,12 @@ class StyleGAN2Generator(Generator):
         return 0.5 * (out + 1)
 
     def custom_partial_forward(self, x, layer_name):
+        self.model.synthesis.block_out = layer_name
         if self.w_primary:
-            return self.model.synthesis(self.model.mapping.forward_w_broadcast(x))
+            return self.model.synthesis(self.model.mapping.forward_w_broadcast(x), block_out=layer_name)
 
 
-        return self.model(x, c=None)
+        return self.model(x, c=None, block_out=layer_name)
 
 
 
@@ -291,7 +292,7 @@ class StyleGAN2Generator(Generator):
 
             skip = to_rgb(out, latent[:, i + 2], skip)
             if f"to_rgbs.{i//2}" in layer_name:
-                return out
+                return skip
 
             i += 2
             noise_i += 2

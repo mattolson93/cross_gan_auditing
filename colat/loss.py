@@ -27,6 +27,7 @@ class ContrastiveLoss(nn.Module):
 
     def forward(self, out: torch.Tensor) -> torch.Tensor:
         n_samples = len(out)
+        #import pdb; pdb.set_trace()
         assert (n_samples % self.k) == 0, "Batch size is not divisible by given k!"
 
         # similarity matrix
