@@ -13,6 +13,7 @@ class LossMetric:
         self.count += batch_size
 
     def compute(self) -> float:
+        if self.count == 0: return 0
         return self.running_loss / self.count
 
     def reset(self) -> None:
@@ -43,6 +44,7 @@ class AccuracyMetric:
         self.total += total_samples
 
     def compute(self) -> float:
+        if self.total == 0: return 0
         return self.correct / self.total
 
     def reset(self) -> None:

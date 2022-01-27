@@ -11,8 +11,9 @@ from torch.utils.tensorboard import SummaryWriter
 from colat.generators import Generator
 from colat.metrics import LossMetric
 
-
-
+import matplotlib.pyplot as plt
+from sklearn.metrics.pairwise import cosine_similarity
+import numpy as np
 
 class Trainer:
     """Model trainer
@@ -114,6 +115,8 @@ class Trainer:
         # Metrics
         self.train_acc_metric = LossMetric()
         self.train_loss_metric = LossMetric()
+        self.train_grad_metric1 = LossMetric()
+        self.train_grad_metric2 = LossMetric()
 
         self.val_acc_metric = LossMetric()
         self.val_loss_metric = LossMetric()
@@ -123,6 +126,8 @@ class Trainer:
         self.multi_gpu = True
         # Best
         self.best_loss = -1
+
+        self.do_multi_cnn =  hasattr(self.projector, 'multiconv') 
 
     def train(self) -> None:
         """Trains the model"""
@@ -159,6 +164,12 @@ class Trainer:
             os.path.join(self.save_path, "final_model.pt"), self.iterations
         )
 
+    def forward_projector(self,x, which_cnn=None):
+        if self.do_multi_cnn:
+            return self.projector(x, which_cnn)
+        else:
+            return self.projector(x)
+
     def _train_loop(self, epoch: int, iterations: int) -> None:
         """
         Regular train loop
@@ -182,8 +193,8 @@ class Trainer:
 
         # Set to eval
         self.generator.eval()
-        
         self.generator2.eval()
+        
 
         if self.train_projector:
             self.projector.train()
@@ -205,10 +216,10 @@ class Trainer:
             # Original features
             with torch.no_grad():
                 orig_feats1 = self.generator.get_features(z1)
-                orig_feats1 = self.projector(orig_feats1, which_cnn=1)
+                orig_feats1 = self.forward_projector(orig_feats1, which_cnn=1)
 
                 orig_feats2 = self.generator2.get_features(z2)
-                orig_feats2 = self.projector(orig_feats2, which_cnn=2)
+                orig_feats2 = self.forward_projector(orig_feats2, which_cnn=2)
                 #orig_feats = self.att_classifier(orig_feats)
 
             # Apply Directions
@@ -217,14 +228,13 @@ class Trainer:
 
             # Forward
             z1 = self.model(z1)
-            feats1 = self.projector(self.generator.get_features(z1), which_cnn=1)
+            feats1 = self.forward_projector(self.generator.get_features(z1), which_cnn=1)
             # Take feature divergence
             feats1 = feats1 - orig_feats1.repeat(self.model.batch_k,1)
             features1 = feats1 / torch.reshape(torch.norm(feats1, dim=1), (-1, 1))
 
-
             z2 = self.model2(z2,self.model.selected_k)
-            feats2 = self.projector(self.generator.get_features(z2), which_cnn=2)
+            feats2 = self.forward_projector(self.generator2.get_features(z2), which_cnn=2)
 
             # Take feature divergence
             feats2 = feats2 - orig_feats2.repeat(self.model.batch_k,1)
@@ -233,9 +243,8 @@ class Trainer:
 
             #import pdb; pdb.set_trace()
             # Loss
-            
-            both_feats = torch.cat([features1,features2])
-            acc, loss = self.loss_fn(both_feats, self.model.selected_k < self.overlap_k)
+            #the first two elements of features1 (for example) are from the SAME direction, just different starting zs
+            acc, loss = self.loss_fn(features1,features2, self.model.selected_k < self.overlap_k, self.batch_size)
             
 
             self.writer.add_scalar("cur_acc", acc.item(), self.cur_iter)
@@ -244,6 +253,7 @@ class Trainer:
 
             #acc = acc1+acc2+acc3
             #loss = loss_overlap + loss_unique1 + loss_unique2
+            #
             loss.backward()
 
             if self.grad_clip_max_norm is not None:
@@ -258,6 +268,24 @@ class Trainer:
             self.train_acc_metric.update(acc.item(), z1.shape[0])
             self.train_loss_metric.update(loss.item(), z1.shape[0])
 
+            '''total_norm=0
+            for p in self.model.parameters():
+                param_norm = p.grad.data.norm(2)
+                total_norm += param_norm.item() ** 2
+            total_norm = total_norm ** (1. / 2)
+
+            total_norm2=0
+            for p in self.model2.parameters():
+                param_norm = p.grad.data.norm(2)
+                total_norm2 += param_norm.item() ** 2
+            total_norm2 = total_norm2 ** (1. / 2)
+
+            #self.train_grad_metric1.update(self.model.params.grad.mean().item() , z1.shape[0])
+            #self.train_grad_metric2.update(self.model2.params.grad.mean().item(), z1.shape[0])
+            if i % 10 == 0:
+                print("grad1 norm", total_norm)
+                print("grad2 norm", total_norm2)
+            '''
             # Update progress bar
             pbar.update()
             pbar.set_postfix_str(
@@ -381,10 +409,10 @@ class Trainer:
                 # Original features
                 with torch.no_grad():
                     orig_feats1 = self.generator.get_features(z1)
-                    orig_feats1 = self.projector(orig_feats1, which_cnn=1)
+                    orig_feats1 = self.forward_projector(orig_feats1, which_cnn=1)
 
                     orig_feats2 = self.generator2.get_features(z2)
-                    orig_feats2 = self.projector(orig_feats2, which_cnn=2)
+                    orig_feats2 = self.forward_projector(orig_feats2, which_cnn=2)
                     #orig_feats = self.att_classifier(orig_feats)
 
                 # Apply Directions
@@ -396,7 +424,7 @@ class Trainer:
                 features_1_2_list = []
                 for generator, z, orig_feats,which_cnn in zip([self.generator, self.generator2], [z1,z2],[orig_feats1,orig_feats2],[1,2]):
                     feats = generator.get_features(z)
-                    feats = self.projector(feats, which_cnn=which_cnn)
+                    feats = self.forward_projector(feats, which_cnn=which_cnn)
 
                     # Take feature divergence
                     feats = feats - orig_feats.repeat(self.model.batch_k,1)
@@ -404,7 +432,7 @@ class Trainer:
 
                     features_1_2_list.append(features)
 
-                acc, loss = self.loss_fn(torch.cat([features_1_2_list[0],features_1_2_list[1]]), self.model.selected_k < self.overlap_k)
+                acc, loss = self.loss_fn(features_1_2_list[0],features_1_2_list[1], self.model.selected_k < self.overlap_k, self.batch_size)
             
                 self.val_acc_metric.update(acc.item(), z.shape[0])
                 self.val_loss_metric.update(loss.item(), z.shape[0])
@@ -429,16 +457,31 @@ class Trainer:
         if self.save_path is not None:
             self._save_model(os.path.join(self.save_path, "most_recent.pt"), iteration)
 
+        #self._save_cosines(self.model , f"cosine_model1_{iteration}.pt")
+        self._save_cosines(self.model , f"cosine_model1.png")
+        self._save_cosines(self.model2, f"cosine_model2.png")
+
+
         eval_loss = self.val_loss_metric.compute()
         if self.best_loss == -1 or eval_loss < self.best_loss:
             self.best_loss = eval_loss
             self._save_model(os.path.join(self.save_path, "best_model.pt"), iteration)
+            self._save_cosines(self.model , f"cosine_best_model1.png")
+            self._save_cosines(self.model2, f"cosine_best_model2.png")
 
         # Clear metrics
         self.train_loss_metric.reset()
         self.train_acc_metric.reset()
         self.val_loss_metric.reset()
         self.val_acc_metric.reset()
+
+    def _save_cosines(self, model, filename):
+        params = model.get_params()
+        if params is None: return
+        plt.matshow(cosine_similarity(params) - np.identity(model.k))
+        plt.colorbar()
+        plt.savefig(os.path.join(self.save_path, filename))
+        plt.clf()
 
     def _epoch_str(self, epoch: int, epoch_time: float):
         s = f"Epoch {epoch} "
@@ -495,7 +538,7 @@ class Trainer:
         )
 
 
-
+'''
 from torchvision import models
 import torch
 import torch.nn as nn
@@ -560,3 +603,4 @@ class AttClsModel(nn.Module):
 
         return x
         
+'''

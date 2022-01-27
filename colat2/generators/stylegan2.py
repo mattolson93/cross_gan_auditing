@@ -19,8 +19,8 @@ import torch.nn as nn
 
 from colat.generators.abstract import Generator
 
-module_path = Path(__file__).parent / "stylegan2-pytorch"
-sys.path.insert(1, str(module_path.resolve()))
+#module_path = Path(__file__).parent / "stylegan2-pytorch"
+#sys.path.insert(1, str(module_path.resolve()))
 
 module_path = Path(__file__).parent / "stylegan2-ada"
 sys.path.insert(1, str(module_path.resolve()))
@@ -164,12 +164,7 @@ class StyleGAN2Generator(Generator):
             self.model.load_state_dict(ckpt["g_ema"], strict=False)
             self.latent_avg = ckpt["latent_avg"].to(self.device)
 
-    def sample_latent(self, n_samples=1, seed=None, truncation=None):
-        if seed is None:
-            seed = np.random.randint(
-                np.iinfo(np.int32).max
-            )  # use (reproducible) global rand state
-
+    def get_rand_z(self, n_samples):
         rng = np.random.RandomState(seed)
         z = (
             torch.from_numpy(
@@ -178,6 +173,23 @@ class StyleGAN2Generator(Generator):
             .float()
             .to(self.device)
         )  # [N, 512]
+        return z
+
+    def convert_z2w(self, z):
+        if self.custom_stylegan2:
+            #import pdb; pdb.set_trace()
+            z = self.model.mapping.forward_w_only(z, None)
+        else:
+            z = self.model.style(z)
+        return z
+
+    def sample_latent(self, n_samples=1, seed=None, truncation=None):
+        if seed is None:
+            seed = np.random.randint(
+                np.iinfo(np.int32).max
+            )  # use (reproducible) global rand state
+
+        z = get_rand_z(n_samples)
 
         if self.w_primary:
             if self.custom_stylegan2:

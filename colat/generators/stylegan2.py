@@ -164,6 +164,25 @@ class StyleGAN2Generator(Generator):
             self.model.load_state_dict(ckpt["g_ema"], strict=False)
             self.latent_avg = ckpt["latent_avg"].to(self.device)
 
+    def get_rand_z(self, n_samples):
+        rng = np.random.RandomState(seed)
+        z = (
+            torch.from_numpy(
+                rng.standard_normal(512 * n_samples).reshape(n_samples, 512)
+            )
+            .float()
+            .to(self.device)
+        )  # [N, 512]
+        return z
+
+    def convert_z2w(self, z):
+        if self.custom_stylegan2:
+            #import pdb; pdb.set_trace()
+            z = self.model.mapping.forward_w_only(z, None)
+        else:
+            z = self.model.style(z)
+        return z
+
     def sample_latent(self, n_samples=1, seed=None, truncation=None):
         if seed is None:
             seed = np.random.randint(

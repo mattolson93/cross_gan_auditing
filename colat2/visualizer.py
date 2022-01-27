@@ -61,6 +61,8 @@ class Visualizer:
         if isinstance(n_samples, int):
             self.samples = self.generator.sample_latent(n_samples)
             self.samples = self.samples.to(self.device)
+        elif type(n_samples) is torch.Tensor:
+            self.samples = n_samples.to(self.device)
         else:
             print(f"Loading input file {n_samples}...")
             self.samples = np.load(n_samples)

@@ -3,3 +3,4 @@ _target_: colat.loss.ContrastiveLoss
 temp: 0.5
 abs: True
 reduce: mean
+otherweight: 1.0

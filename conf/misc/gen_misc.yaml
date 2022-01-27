@@ -9,6 +9,7 @@ n_dirs: 10
 alphas: [-0.3, -0.2, -0.1, 0, 0.1, 0.2, 0.3]
 iterative: True
 image_size: 256
+info: ""
 
 k: 32
 feed_layers: null

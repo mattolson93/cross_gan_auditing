@@ -38,6 +38,10 @@ class LinearConditional(Model):
             )
             self.nets.append(net)
 
+    def get_params(self):
+        #param_list = torch.cat([net[0].weight.detach().cpu() for net in self.nets])
+        return None
+
     def forward(self, z: torch.Tensor, selected_k=None) -> torch.Tensor:
         #  apply all directions to each batch element
         z = torch.reshape(z, [1, -1, self.size])

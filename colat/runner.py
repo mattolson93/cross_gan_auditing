@@ -149,8 +149,7 @@ def generate(cfg: DictConfig) -> None:
     projector: torch.nn.Module = instantiate(cfg.projector).to(device)
 
     # Preload model
-    checkpoint_path = hydra.utils.to_absolute_path(cfg.checkpoint)
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(cfg.checkpoint, map_location=device)
     model.load_state_dict(checkpoint["model"])
     projector.load_state_dict(checkpoint["projector"])
 

@@ -11,6 +11,9 @@ from torch.utils.tensorboard import SummaryWriter
 from colat.generators import Generator
 from colat.metrics import LossMetric
 
+import matplotlib.pyplot as plt
+from sklearn.metrics.pairwise import cosine_similarity
+import numpy as np
 
 class Trainer:
     """Model trainer
@@ -117,7 +120,7 @@ class Trainer:
             if iteration + self.eval_freq < self.iterations:
                 num_iters = self.eval_freq
             else:
-                num_iters = self.iterations - iteration
+                num_iters = max(self.iterations - iteration, 1)
 
             start_epoch_time = time.time()
             if self.mixed_precision:
@@ -365,17 +368,27 @@ class Trainer:
         # Save model
         if self.save_path is not None:
             self._save_model(os.path.join(self.save_path, "most_recent.pt"), iteration)
+            self._save_cosines(self.model , f"cosine.png")
 
         eval_loss = self.val_loss_metric.compute()
         if self.best_loss == -1 or eval_loss < self.best_loss:
             self.best_loss = eval_loss
             self._save_model(os.path.join(self.save_path, "best_model.pt"), iteration)
+            self._save_cosines(self.model , f"cosine_best.png")
 
         # Clear metrics
         self.train_loss_metric.reset()
         self.train_acc_metric.reset()
         self.val_loss_metric.reset()
         self.val_acc_metric.reset()
+
+    def _save_cosines(self, model, filename):
+        params = model.get_params()
+        if params is None: return
+        plt.matshow(cosine_similarity(params) - np.identity(model.k))
+        plt.colorbar()
+        plt.savefig(os.path.join(self.save_path, filename))
+        plt.clf()
 
     def _epoch_str(self, epoch: int, epoch_time: float):
         s = f"Epoch {epoch} "

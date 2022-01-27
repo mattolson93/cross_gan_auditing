@@ -17,65 +17,88 @@ class ContrastiveLoss(nn.Module):
         - Output: scalar
     """
 
-    def __init__(self, k: int, temp: float, abs: bool, reduce: str) -> None:
+    def __init__(self, k: int, temp: float, abs: bool, reduce: str, otherweight: float) -> None:
         super().__init__()
         self.k = k
         self.temp = temp
         self.abs = abs
         self.reduce = reduce
+        self.otherweight = otherweight
         #         self.iter = 0
 
-    def forward(self, feats: torch.Tensor, overlap_inds) -> torch.Tensor:
-        n_samples = len(feats)
-        #import pdb; pdb.set_trace()
-        assert (n_samples % self.k) == 0, "Batch size is not divisible by given k!"
+    def forward(self, feats1: torch.Tensor, feats2, overlap_inds, bs) -> torch.Tensor:
+        n_samples = len(feats1) + len(feats2)
+        n_feats1 = len(feats1)
+        #assert (n_samples % self.k) == 0, "Batch size is not divisible by given k!"
 
+        labels1 = torch.arange(len(overlap_inds)).repeat_interleave(bs)
+        labels2 = -torch.ones_like(labels1)
+        next_class = labels1[-1] + 1
+        for i, is_overlap in enumerate(overlap_inds):
+            bi = i *bs
+            if is_overlap:
+                class_id = i
+            else:
+                class_id = next_class
+                next_class+=1
+
+            labels2[bi:bi+bs] = class_id
+
+        feats = torch.cat([feats1,  feats2])
+        labels = torch.cat([labels1, labels2])
+        labels = (labels.unsqueeze(0) == labels.unsqueeze(1)).float().to(feats.device)
         # similarity matrix
         sim = torch.mm(feats, feats.t().contiguous())
 
+        cross_weighting = torch.ones_like(sim)
+        cross_weighting[len(feats1):, :len(feats1)] = self.otherweight
+        cross_weighting[:len(feats1), len(feats1):] = self.otherweight
+
         if self.abs:
+            exit("simclr abs not implemented")
             sim = torch.abs(sim)
 
-        #         if (self.iter % 100) == 0:
-        #             print(sim)
-        #          self.iter += 1
-
-        sim = torch.exp(sim * self.temp)
-
-        k2 = 2*self.k
-        feats2_start = int(n_samples/2)
+        sim = torch.exp(sim * self.temp )
 
         # mask for pairs
-        mask = torch.zeros((n_samples, n_samples), device=sim.device).bool()
-        for i, is_overlap in enumerate(overlap_inds):
-            start1, end1 = i * (n_samples // k2), (i + 1) * (n_samples // k2)
-            mask[start1:end1, start1:end1] = 1
+        mask = labels.bool()
+       
 
-            start2, end2 = start1 + feats2_start , end1 + feats2_start
-            mask[start2:end2, start2:end2] = 1
-
-            if is_overlap:
-                mask[start1:end1, start2:end2] = 1
-                mask[start2:end2, start1:end1] = 1
-
-
-
-        #print("here")
         #import pdb; pdb.set_trace()
-
         diag_mask = ~(torch.eye(n_samples, device=sim.device).bool())
 
+        pos_mask = mask * diag_mask
+        neg_mask = ~mask
+        total_loss = 0
+        total_pos = 0
+        total_acc = []
+        #import pdb; pdb.set_trace()
+        for i in range(sim.shape[0]):
+            cur_pos = sim[i][pos_mask[i]]
+            cur_neg = sim[i][neg_mask[i]]
+            cur_loss = (cross_weighting[i][pos_mask[i]] * -torch.log(cur_pos / cur_neg.sum())).sum()
+
+            total_pos  += cur_pos.shape[0]
+            total_loss += cur_loss
+            if self.otherweight == 0.0:
+                if i < n_feats1:
+                    total_acc.append(((sim[i][:n_feats1][pos_mask[i][:n_feats1]] > cur_neg.unsqueeze(1)).float().mean(0) == 1.0).float())
+                else:
+                    total_acc.append(((sim[i][n_feats1:][pos_mask[i][n_feats1:]] > cur_neg.unsqueeze(1)).float().mean(0) == 1.0).float())
+            else:
+                total_acc.append(((cur_pos > cur_neg.unsqueeze(1)).float().mean(0) == 1.0).float())
+
+        acc = torch.cat(total_acc).mean()
+        loss = total_loss / total_pos
+        return acc, loss
+
         # pos and neg similarity and remove self similarity for pos
-        #pos = sim.masked_select(mask * diag_mask).view(n_samples, -1)
-        #neg = sim.masked_select(~mask).view(n_samples, -1)
-        pos_mask = mask * diag_mask 
-        neg_mask = (~mask)
-        pos = sim * pos_mask
-        neg = sim * neg_mask 
+        '''pos = sim.masked_select(mask * diag_mask).view(n_samples, -1)
+        neg = sim.masked_select(~mask).view(n_samples, -1)
 
         if self.reduce == "mean":
-            pos = pos.sum(dim=-1) / pos_mask.sum(-1)
-            neg = neg.sum(dim=-1) / neg_mask.sum(-1)
+            pos = pos.mean(dim=-1)
+            neg = neg.mean(dim=-1)
         elif self.reduce == "sum":
             pos = pos.sum(dim=-1)
             neg = neg.sum(dim=-1)
@@ -83,5 +106,5 @@ class ContrastiveLoss(nn.Module):
             raise ValueError("Only mean and sum is supported for reduce method")
 
         acc = (pos > neg).float().mean()
-        loss = -torch.log(pos / neg).sum()
-        return acc, loss
+        loss = -torch.log(pos / neg).mean()
+        return acc, loss'''
