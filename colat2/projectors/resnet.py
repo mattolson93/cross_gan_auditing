@@ -9,9 +9,11 @@ class ResNetProjector(Projector):
         layers: int,
         load_path: str = None,
         normalize: bool = True,
+        random_weight: bool = False,
         
     ):
         # nonlinear mlp
+        self.layers=layers
         net = create_resnet(name=name, layers=layers, load_path=load_path)
         super().__init__(net, normalize)
 

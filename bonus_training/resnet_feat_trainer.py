@@ -1,6 +1,12 @@
 import os
 import lpips
 
+import sys
+# insert at 1, 0 is the script path (or '' in REPL)
+#sys.path.insert(1, '../colat')
+sys.path.insert(1, '/g/g15/olson60/research/latentclr/')
+
+
 import hydra
 import torch
 from torch.nn import functional as F
@@ -17,143 +23,166 @@ from colat2.visualizer import Visualizer
 import copy
 
 from colat.utils.net_utils import create_dre_model
+import torchvision
+from torchvision.utils import save_image
+from torchvision.utils import make_grid
 
-def train(cfg: DictConfig) -> None:
-    """Trains model from config
+def dre_loss(logits, batch_size):
+    dre_logit = F.softplus(dclamp(logits,min=-50, max=50))
 
-    Args:
-        cfg: Hydra config
+    inlier_loss = -torch.log(dre_logit[:batch_size]) 
+    outlier_loss = dre_logit[batch_size:] 
 
-    """
-    # Device
+    return inlier_loss.mean() + outlier_loss.mean()
+
+
+def mymain(cfg: DictConfig) -> None:
+
     device = get_device(cfg)
 
     
     # Model
     # Use Hydra's instantiation to initialize directly from the config file
-    model: torch.nn.Module = instantiate(cfg.model, k=cfg.k, batch_k=cfg.batch_k).to(device)
-    model2: torch.nn.Module = instantiate(cfg.model, k=cfg.k, batch_k=cfg.batch_k).to(device)
-    loss_fn: torch.nn.Module = instantiate(cfg.loss, k=min(cfg.batch_k, cfg.k)).to(device)
+    generator: torch.nn.Module = instantiate(cfg.generator).to(device)
+    #import pdb; pdb.set_trace()
+    generator2: torch.nn.Module = instantiate(cfg.generator2).to(device)
+    
+
+    projector: Projector = instantiate(cfg.projector).to(device)
+    #if False:
+    #projector = AttClsModel("resnet18", cfg.projector.layers, is_pretrained=False).to(device)
+    #projector.net.load_state_dict(torch.load(hydra.utils.to_absolute_path(cfg.model_path)), strict=False)
+    
+
+
+    dre_model = create_dre_model(layers=cfg.projector.layers) 
+
+    optimizer: torch.optim.Optimizer = instantiate(
+        cfg.hparams.optimizer,
+        list(dre_model.parameters()),
+    )
+
+    batch_size = cfg.hparams.batch_size
+
+    dre_model.train()
+    projector.eval()
+    generator.eval()
+    generator2.eval()
+
+    resize = torchvision.transforms.Resize(128)
+
+
+
+    for i in tqdm(range(1000)):
+        optimizer.zero_grad()
+        with torch.no_grad():
+            img1 = generator( generator.sample_latent(batch_size).to(device))
+            img2 = generator2(generator2.sample_latent(batch_size).to(device))
+            #import pdb; pdb.set_trace()
+            imgs = torch.cat([resize(img1),resize(img2)],dim=0)
+            
+            #print(imgs.max(), imgs.min())
+
+            feats = projector(imgs)
+        #import pdb; pdb.set_trace()
+        logits = dre_model(feats)
+        labels = torch.cat([torch.zeros(batch_size), torch.ones(batch_size)],dim=0)
+        #labels = F.one_hot(labels.long(),2).float().cuda()
+
+        loss = dre_loss(logits,batch_size)
+        if i % 10 == 0:
+            acc1 = (logits[:batch_size ]).mean().item()
+            acc2 = (logits[batch_size: ]).mean().item()
+            acc = (acc2 + acc1)/(batch_size*2)
+            print(f"acc1: {acc1:.3f}, acc2: {acc2:.3f}, loss {loss}")
+
+            #import pdb; pdb.set_trace()
+    
+
+
+        loss.backward()
+        optimizer.step()
+        
+    torch.save(dre_model.state_dict(),"dre.pt")
+    _ , new_inds = torch.sort(logits[:batch_size].squeeze())
+    out_imgs = make_grid(img1.clip(0,1)[new_inds]).cpu().detach()
+    save_image(out_imgs,f"{i:05d}_{acc:.3f}.png")
+
+
+
+    print("done")
+
+
+def oldmain(cfg: DictConfig) -> None:
+
+    device = get_device(cfg)
+
+    
+    # Model
+    # Use Hydra's instantiation to initialize directly from the config file
     generator: torch.nn.Module = instantiate(cfg.generator).to(device)
     generator2: torch.nn.Module = instantiate(cfg.generator2).to(device)
     projector: Projector = instantiate(cfg.projector).to(device)
 
+    dre_model = create_dre_model(layers=cfg.projector.layers) 
 
     optimizer: torch.optim.Optimizer = instantiate(
         cfg.hparams.optimizer,
-        list(model.parameters()) + list(model2.parameters()) + list(projector.parameters()) 
-        if cfg.train_projector
-        else list(model.parameters()) + list(model2.parameters()),
-    )
-    scheduler = instantiate(cfg.hparams.scheduler, optimizer)
-
-    # Paths
-    save_path = os.getcwd() if cfg.save else None
-    checkpoint_path = (
-        hydra.utils.to_absolute_path(cfg.checkpoint)
-        if cfg.checkpoint is not None
-        else None
+        list(dre_model.parameters()),
     )
 
-    # Tensorboard
-    if cfg.tensorboard:
-        # Note: global step is in epochs here
-        writer = SummaryWriter(os.getcwd())
-        # Indicate to TensorBoard that the text is pre-formatted
-        text = f"<pre>{OmegaConf.to_yaml(cfg)}</pre>"
-        writer.add_text("config", text)
-    else:
-        writer = None
+    batch_size = cfg.hparams.batch_size
 
-    if cfg.dre_lamb >0:
-        dre_model = create_dre_model(layers=cfg.projector.layers, out_preds=2) 
-        dre_optim: torch.optim.Optimizer = instantiate(cfg.hparams.optimizer,list(dre_model.parameters()))
-    else:
-        dre_model = None
-        dre_optim = None
+    dre_model.train()
+    projector.eval()
+    generator.eval()
+    generator2.eval()
 
-    # Trainer init
-    trainer = Trainer(
-        model=model,
-        model2=model2,
-        loss_fn=loss_fn,
-        optimizer=optimizer,
-        generator=generator,
-        generator2=generator2,
-        projector=projector,
-        batch_size=cfg.hparams.batch_size,
-        iterations=cfg.hparams.iterations,
-        overlap_k=cfg.overlap_k,
-        device=device,
-        eval_freq=cfg.eval_freq,
-        eval_iters=cfg.eval_iters,
-        scheduler=scheduler,
-        grad_clip_max_norm=cfg.hparams.grad_clip_max_norm,
-        writer=writer,
-        save_path=save_path,
-        checkpoint_path=checkpoint_path,
-        mixed_precision=cfg.mixed_precision,
-        train_projector=cfg.train_projector,
-        feed_layers=cfg.feed_layers,
-        dre_model=dre_model,
-        dre_lamb=cfg.dre_lamb,
-        dre_optim=dre_optim,
+    bce_loss = torch.nn.BCEWithLogitsLoss()
 
-    )
+    for i in tqdm(range(250)):
+        optimizer.zero_grad()
+        with torch.no_grad():
+            img1 = generator( generator.sample_latent(batch_size).to(device))
+            img2 = generator2(generator2.sample_latent(batch_size).to(device))
+            imgs = torch.cat([img1,img2],dim=0)
 
-    # Launch training process
-    trainer.train()
+            #print(imgs.max(), imgs.min())
 
-    cfg.n_dirs = list(range(cfg.k))
-    #import pdb; pdb.set_trace()
-    invert_z_file = os.path.join( hydra.utils.get_original_cwd(), 'invertedpoints',cfg['generator']['class_name']+ "_" +cfg['generator2']['class_name'] + ".pt")
+            feats = projector(imgs)
+        #import pdb; pdb.set_trace()
+        logits = dre_model(feats)
+        labels = torch.cat([torch.zeros(batch_size), torch.ones(batch_size)],dim=0)
+        #labels = F.one_hot(labels.long(),2).float().cuda()
 
-    if os.path.exists(invert_z_file):
-        zs = torch.load(invert_z_file, map_location=device)
-        z1 = zs[:cfg.n_samples,0]
-        z2 = zs[:cfg.n_samples,1]
+        loss = dre_loss(logits,batch_size)
+        if i % 10 == 0:
+            acc1 = (logits[:batch_size,0] > logits[:batch_size,1]).sum().item()
+            acc2 = ((logits[batch_size:,0] < logits[batch_size:,1]).sum().item())
+            acc = (acc2 + acc1)/(batch_size*2)
+            print(f"acc: {acc:.4f}, loss {loss}")
+
+            logit_diff = logits[:,0] - logits[:,1]
+            _ , new_inds = torch.sort(logit_diff[:batch_size])
+            out_imgs = make_grid(img1.clip(0,1)[new_inds]).cpu().detach()
+            save_image(out_imgs,f"{i:05d}_1_{acc:.3f}.png")
+
+            logit_diff = logits[:,1] - logits[:,0]
+            _ , new_inds = torch.sort(logit_diff[batch_size:])
+            out_imgs = make_grid(img2.clip(0,1)[new_inds]).cpu().detach()
+            save_image(out_imgs,f"{i:05d}_2_{acc:.3f}.png")
+
+        loss.backward()
+        optimizer.step()
+
+
     
-        if generator.w_primary:  z1 = generator.convert_z2w(z1)
-        if generator2.w_primary: z2 = generator2.convert_z2w(z2)
-
-    else:
-        z1, z2 = invert_2_gens(generator, generator2, cfg.n_samples)
-        torch.save(torch.stack([z1,z2],dim=1),invert_z_file)
-    #from sklearn.metrics.pairwise import cosine_similarity as cos
-    #cos(model.state_dict()['params'].cpu().numpy())
-
-    visualizer = Visualizer(
-        model=model,
-        generator=generator,
-        projector=projector,
-        device=device,
-        #n_samples=cfg.n_samples,
-        n_samples=z1,
-        n_dirs=cfg.n_dirs,
-        alphas=cfg.alphas,
-        iterative=cfg.iterative,
-        feed_layers=cfg.feed_layers,
-        image_size=cfg.image_size,
-        gen_ind=1,
-    )
-    visualizer.visualize()
 
 
-    visualizer2 = Visualizer(
-        model=model2,
-        generator=generator2,
-        projector=projector,
-        device=device,
-        #n_samples=cfg.n_samples,
-        n_samples=z2,
-        n_dirs=cfg.n_dirs,
-        alphas=cfg.alphas,
-        iterative=cfg.iterative,
-        feed_layers=cfg.feed_layers,
-        image_size=cfg.image_size,
-        gen_ind=2,
-    )
-    visualizer2.visualize()
+    torch.save(dre_model.state_dict(),"dre.pt")
+
+    print("done")
+
 
 def evaluate(cfg: DictConfig) -> None:
     """Evaluates model from config
@@ -310,6 +339,9 @@ def generate(cfg: DictConfig) -> None:
     visualizer2.visualize()
 
 
+
+
+
 def get_device(cfg: DictConfig) -> torch.device:
     """Initializes the device from config
 
@@ -334,8 +366,6 @@ def get_device(cfg: DictConfig) -> torch.device:
 def invert_2_gens(G1, G2, n_samples):
     convert2w_1 = G1.w_primary
     convert2w_2 = G2.w_primary
-    #G1.model.custom_out_resolution = 128
-    #G2.model.custom_out_resolution = 128
     
     G1.use_z()
     G2.use_z()
@@ -358,11 +388,9 @@ def invert_2_gens(G1, G2, n_samples):
     mse_lam = 1
 
     for i in pbar:
-        break
+
         img1 = G1(z1)
         img2 = G2(z2)
-
-        if img1.shape[-1] != img2.shape[-1]: break
 
         mse_loss = mse_lam*F.mse_loss(img1, img2)
         l2_loss  = l2_lam *(z1 **2  + z2 **2).mean()
@@ -382,11 +410,52 @@ def invert_2_gens(G1, G2, n_samples):
         z2 = G2.convert_z2w(z2)
         G2.use_w()
 
-    G1.model.custom_out_resolution = None
-    G2.model.custom_out_resolution = None
-
     print(z1.max())
     print(z2.max())
     print(z1.min())
     print(z2.min())
-    return z1.detach(), z2.detach()#, img1, img2
+    return z1.detach(), z2.detach(), img1, img2
+
+
+
+from torch.cuda.amp import custom_bwd, custom_fwd
+
+class DifferentiableClamp(torch.autograd.Function):
+    """
+    In the forward pass this operation behaves like torch.clamp.
+    But in the backward pass its gradient is 1 everywhere, as if instead of clamp one had used the identity function.
+    """
+
+    @staticmethod
+    @custom_fwd
+    def forward(ctx, input, max, min):
+        if min is None: return input.clamp(max=max)
+        if max is None: return input.clamp(min=min)
+        return input.clamp(max=max, min = min)
+
+    @staticmethod
+    @custom_bwd
+    def backward(ctx, grad_output):
+        return grad_output.clone(), None, None
+
+def dclamp(input, max=None, min=None):
+    """
+    Like torch.clamp, but with a constant 1-gradient.
+    :param input: The input that is to be clamped.
+    :param min: The minimum value of the output.
+    :param max: The maximum value of the output.
+    """
+    return DifferentiableClamp.apply(input, max, min)
+
+
+
+
+
+
+@hydra.main(config_path="../conf", config_name="train2")
+def hydra_stuff(cfg: DictConfig):
+    mymain(cfg)
+
+
+if __name__ == "__main__":
+    hydra_stuff()

@@ -12,6 +12,8 @@ class ResNetProjector(Projector):
         
     ):
         # nonlinear mlp
+        self.layers=layers
+        
         net = create_resnet(name=name, layers=layers, load_path=load_path)
         super().__init__(net, normalize)
 

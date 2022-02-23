@@ -53,23 +53,39 @@ class StyleGAN2Generator(Generator):
         # Image widths
         configs = {
             # Converted NVIDIA official
-            "ffhq": 1024,
             "car": 512,
             "cat": 256,
             "church": 256,
             "horse": 256,
+            "anime": 512,
             # Tuomas
             "bedrooms": 256,
             "kitchen": 256,
             "places": 256,
+            #new dl from nvidia
+            "ffhq": 1024,
+            "ffhqsmall": 256,
+            "metfacesu": 1024 ,
+            "metfaces": 1024 ,
+            "lsundog": 256 ,
+            "ffhqu": 1024 ,
+            "ffhqusmall": 256 ,
+            "celebahq": 256 ,
+            "brecahad": 512 ,
+            "afhqwild": 512 ,
+            "afhqv2": 512 ,
+            "afhqdog": 512 ,
+            "afhqcat": 512 ,
+            "test": 512 ,
         }
+        new_downloaded = ["ffhq","ffhqsmall","ffhqusmall","metfacesu", "metfaces", "lsundog", "ffhqu", "celebahq", "brecahad", "afhqwild", "afhqv2", "afhqdog", "afhqcat"]
 
         #assert (
         #    self.outclass in configs
         #), f'Invalid StyleGAN2 class {self.outclass}, should be one of [{", ".join(configs.keys())}]'
 
         self.resolution = 128 if class_name not in configs else configs[self.outclass]
-        self.custom_stylegan2 = class_name not in configs
+        self.custom_stylegan2 = class_name not in configs or class_name in new_downloaded
         self.name = f"StyleGAN2-{self.outclass}"
         self.has_latent_residual = True
         self.load_model()
@@ -116,7 +132,7 @@ class StyleGAN2Generator(Generator):
 
         
 
-
+        #import pdb; pdb.set_trace()
         if self.custom_stylegan2:
 
             ckpt = torch.load(checkpoint)['G']
@@ -128,9 +144,9 @@ class StyleGAN2Generator(Generator):
 
             mapping_kwargs = {"num_layers":ckpt.mapping.num_layers, "w_avg_beta": ckpt.mapping.w_avg_beta}
 
-            synthesis_kwargs = {"conv_clamp":ckpt.synthesis.__dict__['_init_kwargs']['conv_clamp'],
-                "channel_base": ckpt.synthesis.__dict__['_init_kwargs']['channel_base']}
-            
+            synthesis_kwargs = {"channel_base": ckpt.synthesis.__dict__['_init_kwargs']['channel_base']}
+            if "conv_clamp" in ckpt.synthesis.__dict__['_init_kwargs'].keys():
+                synthesis_kwargs["conv_clamp"] = ckpt.synthesis.__dict__['_init_kwargs']['conv_clamp'] 
 
 
             self.model = StyleGAN2Model2(z_dim, c_dim, w_dim, img_resolution, img_channels, mapping_kwargs=mapping_kwargs, synthesis_kwargs=synthesis_kwargs).to(self.device)
@@ -151,7 +167,7 @@ class StyleGAN2Generator(Generator):
             #self.model = ckpt['G'].to(self.device)
             self.model.log_size = int(np.log2(img_resolution))
             self.latent_avg = self.model.mapping.w_avg.to(self.device)
-       
+
         else:
             self.model = StyleGAN2Model(self.resolution, 512, 8).to(self.device)
             zz = self.model.log_size
@@ -161,8 +177,15 @@ class StyleGAN2Generator(Generator):
                 self.download_checkpoint(checkpoint)
                 
             ckpt = torch.load(checkpoint)
-            self.model.load_state_dict(ckpt["g_ema"], strict=False)
-            self.latent_avg = ckpt["latent_avg"].to(self.device)
+
+            if self.outclass =="anime":
+                self.latent_avg = ckpt["truncation_latent"].to(self.device)
+            else:
+                self.latent_avg = ckpt["latent_avg"].to(self.device)
+                ckpt = ckpt["g_ema"]
+
+            self.model.load_state_dict(ckpt, strict=False)
+
 
     def get_rand_z(self, n_samples):
         rng = np.random.RandomState(seed)
@@ -199,7 +222,7 @@ class StyleGAN2Generator(Generator):
         )  # [N, 512]
 
         if self.w_primary:
-            if self.custom_stylegan2:
+            if self.custom_stylegan2 :
                 #import pdb; pdb.set_trace()
                 z = self.model.mapping.forward_w_only(z, None)
             else:
@@ -312,6 +335,9 @@ class StyleGAN2Generator(Generator):
             skip = to_rgb(out, latent[:, i + 2], skip)
             if f"to_rgbs.{i//2}" in layer_name:
                 return skip
+
+            if skip.shape[-1] == self.model.custom_out_resolution: return skip     
+            
 
             i += 2
             noise_i += 2

@@ -17,6 +17,8 @@ k: 32
 overlap_k: 4
 batch_k: 16
 info: ""
+dre_lamb: 0
+dre_path: ""
 
 feed_layers: null
 train_projector: false
@@ -26,3 +28,4 @@ n_dirs: -1
 alphas: [1,2,3,6,10, 15]
 iterative: False 
 image_size: 128
+

@@ -3,6 +3,7 @@ hparams:
   iterations: 100000
   grad_clip_max_norm: null # change to float to activate
 
+
   optimizer:
     _target_: torch.optim.Adam
     lr: 0.001

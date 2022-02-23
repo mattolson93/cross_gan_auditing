@@ -77,6 +77,8 @@ def train(cfg: DictConfig) -> None:
         mixed_precision=cfg.mixed_precision,
         train_projector=cfg.train_projector,
         feed_layers=cfg.feed_layers,
+        dre_path=cfg.dre_path,
+
     )
 
     # Launch training process

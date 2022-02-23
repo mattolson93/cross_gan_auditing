@@ -218,6 +218,7 @@ class StyleGAN2Generator(Generator):
         elif self.custom_stylegan2:
             out = self.model(x,c=None)
         else:
+            exit("need to fix truncation for anime gan")
             out, _ = self.model(
                 x,
                 noise=self.noise,

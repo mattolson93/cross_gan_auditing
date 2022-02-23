@@ -5,6 +5,7 @@ from typing import List, Optional
 
 import torch
 import tqdm
+from torch.nn import functional as F
 from torch.cuda.amp import GradScaler, autocast
 from torch.utils.tensorboard import SummaryWriter
 
@@ -14,6 +15,7 @@ from colat.metrics import LossMetric
 import matplotlib.pyplot as plt
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
+from colat.utils.net_utils import create_dre_model
 
 class Trainer:
     """Model trainer
@@ -56,6 +58,7 @@ class Trainer:
         mixed_precision: bool = False,
         train_projector: bool = True,
         feed_layers: Optional[List[int]] = None,
+        dre_path: str = "",
     ) -> None:
 
         # Logging
@@ -108,6 +111,18 @@ class Trainer:
 
         # Best
         self.best_loss = -1
+        if dre_path != "":
+            self.dre_model = create_dre_model(layers=4)
+            self.dre_model.load_state_dict(torch.load(dre_path))
+        else:
+            self.dre_model = None
+        self.generator.model.custom_out_resolution = 128
+
+    def dre_loss(self, feats):
+        logits = F.softplus(dclamp(self.dre_model(feats),min=-50, max=50))
+        loss = -torch.log(logits)
+        return loss.mean()  
+
 
     def train(self) -> None:
         """Trains the model"""
@@ -184,6 +199,8 @@ class Trainer:
             # Get features
             feats = self.generator.get_features(z)
             feats = self.projector(feats)
+            dreloss = self.dre_loss(feats) if self.dre_model is not None else 0
+
 
             # Take feature divergence
             feats = feats - orig_feats.repeat(self.model.batch_k,1)
@@ -191,6 +208,7 @@ class Trainer:
 
             # Loss
             acc, loss = self.loss_fn(features)
+            loss = loss + dreloss
             loss.backward()
 
             if self.grad_clip_max_norm is not None:
@@ -441,3 +459,31 @@ class Trainer:
         self.logger.info(
             f"Checkpoint loaded, resuming from iteration {self.start_iteration}"
         )
+
+from torch.cuda.amp import custom_bwd, custom_fwd
+class DifferentiableClamp(torch.autograd.Function):
+    """
+    In the forward pass this operation behaves like torch.clamp.
+    But in the backward pass its gradient is 1 everywhere, as if instead of clamp one had used the identity function.
+    """
+
+    @staticmethod
+    @custom_fwd
+    def forward(ctx, input, max, min):
+        if min is None: return input.clamp(max=max)
+        if max is None: return input.clamp(min=min)
+        return input.clamp(max=max, min = min)
+
+    @staticmethod
+    @custom_bwd
+    def backward(ctx, grad_output):
+        return grad_output.clone(), None, None
+
+def dclamp(input, max=None, min=None):
+    """
+    Like torch.clamp, but with a constant 1-gradient.
+    :param input: The input that is to be clamped.
+    :param min: The minimum value of the output.
+    :param max: The maximum value of the output.
+    """
+    return DifferentiableClamp.apply(input, max, min)

@@ -492,6 +492,9 @@ class SynthesisNetwork(torch.nn.Module):
             if is_last:
                 self.num_ws += block.num_torgb
             setattr(self, f'b{res}', block)
+        self.custom_out_resolution = None
+
+    
 
     def forward(self, ws, block_out='', **block_kwargs):
         block_ws = []
@@ -508,6 +511,8 @@ class SynthesisNetwork(torch.nn.Module):
         for i, (res, cur_ws) in enumerate(zip(self.block_resolutions, block_ws)):
             block = getattr(self, f'b{res}')
             x, img = block(x, img, cur_ws, **block_kwargs)
+            if img.shape[-1] == self.custom_out_resolution:  break
+
             if f'block_{i}' == block_out: return x
 
         return img
@@ -534,6 +539,10 @@ class Generator(torch.nn.Module):
         self.synthesis = SynthesisNetwork(w_dim=w_dim, img_resolution=img_resolution, img_channels=img_channels, **synthesis_kwargs)
         self.num_ws = self.synthesis.num_ws
         self.mapping = MappingNetwork(z_dim=z_dim, c_dim=c_dim, w_dim=w_dim, num_ws=self.num_ws, **mapping_kwargs)
+
+
+    def set_global_resolution(self, res):
+        self.synthesis.custom_out_resolution = res
 
     def forward(self, z, c, block_out="", truncation_psi=1, truncation_cutoff=None, **synthesis_kwargs):
         ws = self.mapping(z, c, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff)

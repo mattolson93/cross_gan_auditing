@@ -68,6 +68,7 @@ class Fixed(Model):
     def forward(self, z: torch.Tensor, selected_k=None) -> torch.Tensor:
         #  apply all directions to each batch element
         #[bs,size]
+        exit("not implemented lol")
         z = torch.reshape(z, [1, -1, self.size])
         #[1,bs,size]
         z = z.repeat(
