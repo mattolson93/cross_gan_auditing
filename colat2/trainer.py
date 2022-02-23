@@ -325,11 +325,8 @@ class Trainer:
             # Original features
             with torch.no_grad():
                 orig_feats1_combo = self.generator.get_features(cat(z1_orig, z1_nograd))
+                orig_feats2_combo = self.generator2.get_features(cat(z2_orig, z2_nograd))
                 #big gan hack
-                to_combo = []
-                for split in torch.split(cat(z2_orig, z2_nograd),8):
-                    to_combo.append(self.generator2.get_features(split))
-                orig_feats2_combo = torch.cat(to_combo, dim=0)
                 #orig_feats2_combo = self.generator2.get_features(cat(z2_orig, z2_nograd))
 
 
