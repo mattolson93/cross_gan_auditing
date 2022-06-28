@@ -60,40 +60,52 @@ class Fixed(Model):
         self.need_perm = self.k != batch_k
         self.size = size
         self.params = torch.nn.Parameter(torch.randn(k, size))
+        self.need_perm = self.k != batch_k
         self.selected_k = None
 
     def get_params(self):
         return self.params.detach().cpu().numpy()
 
-    def forward(self, z: torch.Tensor, selected_k=None) -> torch.Tensor:
+    def forward(self, z: torch.Tensor, selected_k=None, unselected_k=None) -> torch.Tensor:
         #  apply all directions to each batch element
         #[bs,size]
-        exit("not implemented lol")
         z = torch.reshape(z, [1, -1, self.size])
-        #[1,bs,size]
-        z = z.repeat(
+        z1 = z.repeat(
             (
                 self.batch_k,
                 1,
                 1,
             )
         )
-        #[batch_k, batch, size]
-
-        #  add directions
+        # calculate directions
         if selected_k is None:
             if self.need_perm:
-                selected_k = torch.sort(torch.randperm(self.k)[:self.batch_k])[0]
+                random_k = torch.randperm(self.k)
+                selected_k = torch.sort(random_k[:self.batch_k])[0]
+                unselected_k = torch.sort(random_k[self.batch_k:])[0]
             else:
                 selected_k = torch.arange(self.k)
         #import pdb; pdb.set_trace()
-        all_directions = torch.reshape(self.post_process(self.params[selected_k]), (self.batch_k, 1, self.size))
-        z += all_directions
+        all_directions1 = torch.reshape(self.post_process(self.params[selected_k]), (self.batch_k, 1, self.size))
+        z1 += all_directions1
+
+        if self.need_perm == False: return torch.reshape(z1, [-1, self.size])
+        z2 = z.repeat(
+            (
+                self.k - self.batch_k,
+                1,
+                1,
+            )
+        )
+
+        all_directions2 = torch.reshape(self.post_process(self.params[unselected_k]), (self.k - self.batch_k, 1, self.size))
+        z2 += all_directions2
 
         self.selected_k = selected_k.detach()
+        self.unselected_k = unselected_k.detach()
         
         # reshape
-        return torch.reshape(z, [-1, self.size])
+        return torch.reshape(z1, [-1, self.size]), torch.reshape(z2, [-1, self.size])
 
     def forward_single(self, z: torch.Tensor, k: int) -> torch.Tensor:
         return z + self.post_process(self.params)[k : k + 1, :]

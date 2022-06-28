@@ -1,6 +1,7 @@
 from abc import ABC as AbstractBaseClass
 
 import torch
+import torchvision.transforms as transforms
 
 
 class Projector(AbstractBaseClass, torch.nn.Module):
@@ -15,6 +16,11 @@ class Projector(AbstractBaseClass, torch.nn.Module):
         self.normalize = normalize
         self.net = net
         self.add_module("Projector", net)
+        self.resize = transforms.Resize(128)
+
+        
+    def get_outsize(self):
+        return self.hidden_size
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         input = torch.reshape(input, (input.shape[0], -1))

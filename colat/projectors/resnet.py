@@ -16,6 +16,10 @@ class ResNetProjector(Projector):
         
         net = create_resnet(name=name, layers=layers, load_path=load_path)
         super().__init__(net, normalize)
+        self.hidden_size = net.hidden_size
+
+    def get_size(self): return self.hidden_size
+    
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         out = self.net(input)

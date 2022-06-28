@@ -4,6 +4,9 @@ import time
 from typing import List, Optional
 
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import random 
 
 import tqdm
 from torch.cuda.amp import GradScaler, autocast
@@ -11,13 +14,13 @@ from torch.utils.tensorboard import SummaryWriter
 
 from colat.generators import Generator
 from colat.metrics import LossMetric
+from colat.loss import ContrastiveLoss
 
 
 import matplotlib.pyplot as plt
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 
-import torch
 from torch.cuda.amp import custom_bwd, custom_fwd
 
 class DifferentiableClamp(torch.autograd.Function):
@@ -80,6 +83,8 @@ class Trainer:
         iterations: int,
         overlap_k: int,
         device: torch.device,
+        visualizer,
+        visualizer2,
         eval_freq: int = 1000,
         eval_iters: int = 100,
         scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
@@ -94,7 +99,10 @@ class Trainer:
         dre_model: torch.nn.Module = None,
         dre_lamb: int =0,
         global_resolution: int = None,
+        
         dre_optim : torch.optim.Optimizer = None,
+        extra_stuff = {},
+        trans_model = None,
 
     ) -> None:
 
@@ -172,69 +180,72 @@ class Trainer:
         self.dre_model = dre_model
         self.dre_optim = dre_optim
 
-        #self.optimizer.param_groups.append({'params': self.dre_model.parameters() })
+        self.visualizer = visualizer
+        self.visualizer2 = visualizer2
+
         self.softplus = torch.nn.Softplus()
+        self.mse = torch.nn.MSELoss()
 
-    #How this should really work:
-    #an image generated from dataset 1 unique is a test instance where overlap from either
-    #is a train instance
-    #2 DRE models where each treats its own gen's unique as the test set
-    def dre_update(self, feats1, feats2):
-        self.dre_optim.zero_grad()
-        dre_logit = self.dre_model(torch.cat([feats1.detach(), feats2.detach()], dim=0))
-        dre_logit = self.softplus(dclamp(dre_logit,min=-50, max=50))
+        self.exps = extra_stuff
+        if self.exp("do_trans") > 0:
+            self.trans = trans_model
 
-        f1s = feats1.shape[0]
+        #self.optimizer.param_groups.append({'params': self.dre_model.parameters() })
+        
 
-        dre_logit1 = dre_logit[:, 0]
-        dre_logit2 = dre_logit[:, 1]
+        if self.exp("selfclr_lamb") > 0:
+            self.generator.save_intermediate()#self.exp("selfclr_layer"))
+            self.selfclr_loss = ContrastiveLoss(self.model.batch_k, .5, False, "mean", 0.0)
 
-        inlier_loss = -torch.log(dre_logit1[:f1s]) - torch.log(dre_logit2[f1s:])
-        outlier_loss = dre_logit1[f1s:] + dre_logit2[:f1s]
+    def exp(self, key):
+        if key in self.exps.keys():
+            return self.exps[key]
+        else:
+            return 0
 
-
-        loss = inlier_loss.mean() + outlier_loss.mean()
-        loss.backward()
-        self.dre_optim.step()
-        self.dre_optim.zero_grad()
-        return loss.item()
 
 
     def dre_loss_fn(self, feats1, feats2, overlap_inds, bs):
-        dre_logit = self.dre_model(torch.cat([feats1, feats2], dim=0))
-        dre_logit = self.softplus(dclamp(dre_logit,min=-50, max=50))
-
-        f1s = feats1.shape[0]
-
-        dre_logit1 = dre_logit[:, 0]
-        dre_logit2 = dre_logit[:, 1]
-        
-
+        #import pdb; pdb.set_trace()
         #unique indices should maximize the logit
         #overlap should minimize the logit
-        unique_inds1 = torch.cat([(~overlap_inds).repeat_interleave(bs), torch.zeros(len(feats2)).bool()])
-        unique_inds2 = torch.cat([torch.zeros(len(feats1)).bool(), (~overlap_inds).repeat_interleave(bs)])
-        overlap_inds = (overlap_inds).repeat_interleave(bs).repeat(2)
+        unique_count = (~overlap_inds).sum() * bs
+        if unique_count == 0: return (torch.zeros(1) - .001 )[0].cuda()
 
-        only_overlap = overlap_inds.sum() == overlap_inds.shape[0]
-        only_unique  = overlap_inds.sum() == 0
+        #unique_feats1_inds = torch.cat([(~overlap_inds).repeat_interleave(bs), torch.zeros(len(feats2)).bool()])
+        #unique_feats2_inds = torch.cat([torch.zeros(len(feats1)).bool(), (~overlap_inds).repeat_interleave(bs)])
+        unique_inds = (~overlap_inds).repeat_interleave(bs)
 
-        inlier_loss  = 0 if only_unique  else -torch.log(dre_logit[overlap_inds]).mean() 
-        outlier_loss = 0 if only_overlap else dre_logit1[unique_inds1].mean() + dre_logit2[unique_inds2].mean()
+        unique_feats = torch.cat([feats1[unique_inds], feats2[unique_inds]], dim=0)
+
+        dre_logit = self.dre_model(unique_feats)
+
+        #using the DRE that calls dist 2 outliers, make sure these unique directions are small
+        l2 = dre_logit[unique_count:, 0] #dist1 is inlier, dist2 is outlier
+
+        #using the DRE that calls dist 1 outliers, make sure these unique directions are small
+        l1 = dre_logit[:unique_count, 1]
+
+
+        #l1 = -torch.log(1-pred1[unique_inds1]) * (pred1[unique_inds1] > .1)
+        #l2 = -torch.log(1-pred2[unique_inds2]) * (pred2[unique_inds2] > .1)
+        #outlier_loss = 0 if only_overlap else l1.mean() + l2.mean()
 
         #print(inlier_loss, outlier_loss)
         #
-        return inlier_loss + outlier_loss
+        return l1.mean() + l2.mean()
 
+
+   
 
     def train(self) -> None:
         """Trains the model"""
         self.logger.info("Beginning training")
         start_time = time.time()
 
-        epoch = 0
+        self.epoch = 0
         iteration = self.start_iteration
-        self._val_loop(epoch, 0)
+        self._val_loop(self.epoch , 0)
 
         while iteration < self.iterations:
             if iteration + self.eval_freq < self.iterations:
@@ -244,23 +255,27 @@ class Trainer:
 
             start_epoch_time = time.time()
             if self.mixed_precision:
-                self._train_loop_amp(epoch, num_iters)
+                self._train_loop_amp(self.epoch , num_iters)
             else:
-                self._train_loop(epoch, num_iters)
+                self._train_loop(self.epoch , num_iters)
 
-            #self._val_loop(epoch, self.eval_iters)
+            #self._val_loop(self.epoch , self.eval_iters)
 
             epoch_time = time.time() - start_epoch_time
-            #self._end_loop(epoch, epoch_time, iteration)
+            #self._end_loop(self.epoch , epoch_time, iteration)
 
             iteration += num_iters
-            epoch += 1
+            self.epoch  += 1
+            self._save_model( os.path.join(self.save_path, "final_model.pt"), self.epoch)
+
+            #final visual
+            if iteration % 3 == 0:
+                self.visualizer.visualize(trainepoch=str(self.epoch))
+                self.visualizer2.visualize(trainepoch=str(self.epoch))
 
         train_time_h = (time.time() - start_time) / 3600
         self.logger.info(f"Finished training! Total time: {train_time_h:.2f}h")
-        self._save_model(
-            os.path.join(self.save_path, "final_model.pt"), self.iterations
-        )
+        self._save_model( os.path.join(self.save_path, "final_model.pt"), self.iterations)
 
     def forward_projector(self,x, which_cnn=None):
         x1, x2 = x
@@ -268,8 +283,8 @@ class Trainer:
             ret1 = self.projector(x1, 1)
             ret2 = self.projector(x2, 2)
         else:
-            x1 = self.projector.net.resize(x1)
-            x2 = self.projector.net.resize(x2)
+            x1 = self.projector.resize(x1)
+            x2 = self.projector.resize(x2)
             ret = self.projector(torch.cat([x1,x2],dim=0))
             ret1, ret2 = torch.split(ret, [x1.shape[0],x2.shape[0]])
 
@@ -317,56 +332,95 @@ class Trainer:
 
             # Apply Directions
             self.optimizer.zero_grad()
-
-            z1_grad, z1_nograd = self.model(z1_orig)
-            z2_grad, z2_nograd = self.model2(z2_orig,self.model.selected_k, self.model.unselected_k)
+            #import pdb; pdb.set_trace()
+            d1_grad, d1_nograd = self.model(z1_orig)
+            d2_grad, d2_nograd = self.model2(z2_orig,self.model.selected_k, self.model.unselected_k)
 
 
             # Original features
             with torch.no_grad():
-                orig_feats1_combo = self.generator.get_features(cat(z1_orig, z1_nograd))
-                orig_feats2_combo = self.generator2.get_features(cat(z2_orig, z2_nograd))
+                gen_feats1_combo_nograd = self.generator.get_features( cat(z1_orig, d1_nograd))
+                if self.exp("selfclr_lamb") > 0: selfclr_feats_orig, _ = torch.split(self.generator.get_intermediate(), [z1_orig.shape[0],d1_nograd.shape[0]])
+
+                gen_feats2_combo_nograd = self.generator2.get_features(cat(z2_orig, d2_nograd))
+                if self.exp("do_trans") > 0: gen_feats2_combo_nograd = self.trans(gen_feats2_combo_nograd)
+                
+
+                orig_gen_feats1, _ = torch.split(gen_feats1_combo_nograd, [z1_orig.shape[0],d1_nograd.shape[0]])
+                orig_gen_feats2, _ = torch.split(gen_feats2_combo_nograd, [z2_orig.shape[0],d2_nograd.shape[0]])
+
                 #big gan hack
                 #orig_feats2_combo = self.generator2.get_features(cat(z2_orig, z2_nograd))
 
+                orig_d_feats1_combo, orig_d_feats2_combo = self.forward_projector((gen_feats1_combo_nograd, gen_feats2_combo_nograd))
 
-                orig_feats1_combo, orig_feats2_combo = self.forward_projector((orig_feats1_combo, orig_feats2_combo ))
+                orig_feats1, feats1_nograd = torch.split(orig_d_feats1_combo, [z1_orig.shape[0],d1_nograd.shape[0]])
+                orig_feats2, feats2_nograd = torch.split(orig_d_feats2_combo, [z2_orig.shape[0],d2_nograd.shape[0]])
 
-                orig_feats1, feats1_nograd = torch.split(orig_feats1_combo, [z1_orig.shape[0],z1_nograd.shape[0]])
-                orig_feats2, feats2_nograd = torch.split(orig_feats2_combo, [z2_orig.shape[0],z2_nograd.shape[0]])
+                diffed_features1_nograd = self.diff_norm_feats(feats1_nograd, orig_feats1, self.model.k - self.model.batch_k)
+                diffed_features2_nograd = self.diff_norm_feats(feats1_nograd, orig_feats2, self.model.k - self.model.batch_k)
 
-                features1_nograd = self.diff_norm_feats(feats1_nograd, orig_feats1, self.model.k - self.model.batch_k)
-                features2_nograd = self.diff_norm_feats(feats2_nograd, orig_feats2, self.model.k - self.model.batch_k)
-
-                
             
-            gen_feats1 = self.generator.get_features(z1_grad)
-            gen_feats2 = self.generator2.get_features(z2_grad)
+            gen_feats1 = self.generator.get_features(d1_grad)
+            gen_feats2 = self.generator2.get_features(d2_grad)
+            if self.exp("do_trans") > 0: gen_feats2 = self.trans(gen_feats2)
 
             # Forward
             feats1, feats2 = self.forward_projector((gen_feats1, gen_feats2))
-            features1 = self.diff_norm_feats(feats1, orig_feats1, self.model.batch_k)
-            features2 = self.diff_norm_feats(feats2, orig_feats2, self.model.batch_k)
+            diffed_features1 = self.diff_norm_feats(feats1, orig_feats1, self.model.batch_k)
+            diffed_features2 = self.diff_norm_feats(feats2, orig_feats2, self.model.batch_k)
 
-
-
-            #import pdb; pdb.set_trace()
+            
             # Loss
             #the first two elements of features1 (for example) are from the SAME direction, just different starting zs
-            overlaps = torch.cat([self.model.selected_k,self.model.unselected_k]) < self.overlap_k
-            f1 = cat(features1,feats1_nograd)
-            f2 = cat(features2,features2_nograd)
-            acc, loss_simclr = self.loss_fn(f1,f2, overlaps , self.batch_size)
+            label_order= torch.cat([self.model.selected_k,self.model.unselected_k])
+            f1 = cat(diffed_features1,diffed_features1_nograd)
+            f2 = cat(diffed_features2,diffed_features2_nograd)
+            acc, loss_simclr = self.loss_fn(f1,f2, label_order < self.overlap_k, self.batch_size, label_order=label_order)
+            loss = loss_simclr 
             
-            
+            out_string = f"Acc{acc.item():.3f} loss{loss_simclr.item():.3f}"
+
+
+
+
             if self.dre_lamb > 0:
                 #import pdb; pdb.set_trace()
-                dre_internal_loss = self.dre_update(cat(features1,feats1_nograd),cat(features2,features2_nograd))
-                loss_dre = self.dre_loss_fn(features1, features2, self.model.selected_k< self.overlap_k, self.batch_size)
-            else:
-                loss_dre = torch.zeros(1).cuda()
+                loss_dre = self.dre_lamb * self.dre_loss_fn(feats1, feats2, self.model.selected_k< self.overlap_k, self.batch_size)
+                out_string += f" ldre: {loss_dre.item():.3f}"
+                loss += loss_dre 
 
-            loss = loss_simclr + (self.dre_lamb * loss_dre )
+
+            if self.exp("recon") > 0:
+                color_loss1 = self.mse(orig_gen_feats1.repeat(self.model.batch_k,1,1,1) , gen_feats1)
+                color_loss2 = self.mse(orig_gen_feats2.repeat(self.model.batch_k,1,1,1) , gen_feats2)
+                color_loss = self.exp("recon") * (color_loss1 + color_loss2)
+                out_string += f" recon: {color_loss.item():.3f}"
+                loss += color_loss 
+           
+            if self.exp("selfclr_lamb") > 0:
+                #import pdb; pdb.set_trace()
+                selfclr_feat1 = self.generator.get_intermediate()
+                selfclr_feat1 = torch.reshape(selfclr_feat1 - selfclr_feats_orig.repeat(self.model.batch_k,1,1,1),(selfclr_feat1.shape[0],-1))
+                selfclr_feat1 = selfclr_feat1 / torch.reshape(torch.norm(selfclr_feat1, dim=1), (-1, 1))
+                #if len(selfclr_feat1.shape) == 4 and selfclr_feat1.shape[-1] >=8:
+                #    selfclr_feat1 = F.max_pool2d(selfclr_feat1,kernel_size=4) 
+
+
+                selfclr_acc, selfclr_loss =  self.selfclr_loss(selfclr_feat1)
+                selfclr_loss *= self.exp("selfclr_lamb")
+
+                out_string += f" slfclr {selfclr_acc.item():.3f}:{selfclr_loss.item():.3f}"
+                loss += selfclr_loss 
+
+            if self.exp("l2latent_lamb") > 0:
+                #import pdb; pdb.set_trace()
+                l2_latent_loss1 = self.mse(orig_feats1.repeat(self.model.batch_k,1), feats1)
+                l2_latent_loss2 = self.mse(orig_feats2.repeat(self.model.batch_k,1), feats2)
+                l2_latent_loss = self.exp("l2latent_lamb") * (l2_latent_loss1 + l2_latent_loss2)
+
+                out_string += f" l2latent: {l2_latent_loss.item():.3f}"
+                loss += l2_latent_loss 
 
 
             self.writer.add_scalar("cur_acc", acc.item(), self.cur_iter)
@@ -388,32 +442,12 @@ class Trainer:
 
 
             # Update metrics
-            self.train_acc_metric.update(acc.item(), features1.shape[0])
-            self.train_loss_metric.update(loss.item(), features1.shape[0])
+            self.train_acc_metric.update(acc.item(), f1.shape[0])
+            self.train_loss_metric.update(loss.item(), f1.shape[0])
 
-            '''total_norm=0
-            for p in self.model.parameters():
-                param_norm = p.grad.data.norm(2)
-                total_norm += param_norm.item() ** 2
-            total_norm = total_norm ** (1. / 2)
-
-            total_norm2=0
-            for p in self.model2.parameters():
-                param_norm = p.grad.data.norm(2)
-                total_norm2 += param_norm.item() ** 2
-            total_norm2 = total_norm2 ** (1. / 2)
-
-            #self.train_grad_metric1.update(self.model.params.grad.mean().item() , z1.shape[0])
-            #self.train_grad_metric2.update(self.model2.params.grad.mean().item(), z1.shape[0])
-            if i % 10 == 0:
-                print("grad1 norm", total_norm)
-                print("grad2 norm", total_norm2)
-            '''
-            # Update progress bar
+       
             pbar.update()
-            pbar.set_postfix_str(
-                f"Acc{acc.item():.3f} Loss{loss_simclr.item():.3f} ldre: {loss_dre.item():.2f}", refresh=False
-            )
+            pbar.set_postfix_str(out_string, refresh=False)
 
         pbar.close()
 
@@ -500,7 +534,7 @@ class Trainer:
 
         # Save model
         #if self.save_path is not None:
-        #    self._save_model(os.path.join(self.save_path, "most_recent.pt"), iteration)
+        self._save_model(os.path.join(self.save_path, "final_model.pt"), iteration)
 
         #self._save_cosines(self.model , f"cosine_model1_{iteration}.pt")
         self._save_cosines(self.model , f"cosine_model1.png")
@@ -552,7 +586,7 @@ class Trainer:
             "optimizer": self.optimizer.state_dict(),
             "model": self.model.state_dict(),
             "model2": self.model2.state_dict() ,
-            "projector": self.projector.state_dict(),
+            "projector": self.projector.state_dict() if self.train_projector else None,
             "scheduler": self.scheduler.state_dict()
             if self.scheduler is not None
             else None,
@@ -583,69 +617,3 @@ class Trainer:
         )
 
 
-'''
-from torchvision import models
-import torch
-import torch.nn as nn
-
-class Wrapper(nn.Module):
-    def __init__(self, model):
-        super(Wrapper, self).__init__()
-        self.model = DataParallelPassthrough(model)
-
-    def forward(self, func_name, *inputs):
-        class_method = getattr(self.model, func_name)
-        return class_method(*inputs)
-
-#B = DistributedDataParallel(Wrapper(), ...)
-
-class DataParallelPassthrough(nn.DataParallel):
-    def __getattr__(self, name):
-        try:
-            return super(DataParallelPassthrough, self).__getattr__(name)
-        except AttributeError:
-            return getattr(self.module, name)
-
-class AttClsModel(nn.Module):
-    def __init__(self, model_type):
-        super(AttClsModel, self).__init__()
-        if model_type == 'resnet50':
-            self.backbone = models.resnet50(pretrained=True)
-            hidden_size = 2048
-        elif model_type == 'resnet34':
-            self.backbone = models.resnet34(pretrained=True)
-            hidden_size = 512
-        elif model_type == 'resnet18':
-            self.backbone = models.resnet18(pretrained=True)
-            hidden_size = 512
-        else:
-            raise NotImplementedError
-        #self.lambdas = torch.ones((40,), device=device)
-        self.val_loss = []  # max_len == 2*k
-        self.fc = nn.Linear(hidden_size, 40)
-        self.dropout = nn.Dropout(0.5)
-
-    def backbone_forward(self, x):
-        x = self.backbone.conv1(x)
-        x = self.backbone.bn1(x)
-        x = self.backbone.relu(x)
-        x = self.backbone.maxpool(x)
-
-        x = self.backbone.layer1(x)
-        x = self.backbone.layer2(x)
-        x = self.backbone.layer3(x)
-        #x = self.backbone.layer4(x)
-
-        #x = self.backbone.avgpool(x)
-
-        return x
-
-    def forward(self, input, labels=None):
-        x = self.backbone_forward(input)
-        x = torch.flatten(x, 1)
-        #x = self.dropout(x)
-        #x = self.fc(x)
-
-        return x
-        
-'''

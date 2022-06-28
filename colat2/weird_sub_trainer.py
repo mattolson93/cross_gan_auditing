@@ -5,17 +5,14 @@ from typing import List, Optional
 
 import torch
 import tqdm
-from torch.nn import functional as F
 from torch.cuda.amp import GradScaler, autocast
 from torch.utils.tensorboard import SummaryWriter
 
 from colat.generators import Generator
 from colat.metrics import LossMetric
 
-import matplotlib.pyplot as plt
-from sklearn.metrics.pairwise import cosine_similarity
-import numpy as np
-from colat.utils.net_utils import create_dre_model
+
+
 
 class Trainer:
     """Model trainer
@@ -41,12 +38,14 @@ class Trainer:
     def __init__(
         self,
         model: torch.nn.Module,
+        model2: torch.nn.Module,
         loss_fn: torch.nn.Module,
         optimizer: torch.optim.Optimizer,
         generator: Generator,
         projector: torch.nn.Module,
         batch_size: int,
         iterations: int,
+        overlap_k: int,
         device: torch.device,
         eval_freq: int = 1000,
         eval_iters: int = 100,
@@ -58,7 +57,8 @@ class Trainer:
         mixed_precision: bool = False,
         train_projector: bool = True,
         feed_layers: Optional[List[int]] = None,
-        dre_path: str = "",
+        generator2: Generator = None,
+
     ) -> None:
 
         # Logging
@@ -73,12 +73,20 @@ class Trainer:
 
         # Model
         self.model = model
+        self.model2 = model2
         self.loss_fn = loss_fn
         self.optimizer = optimizer
         self.generator = generator
+        self.generator2 = generator2
         self.projector = projector
         self.train_projector = train_projector
         self.feed_layers = feed_layers
+        self.overlap_k = overlap_k
+
+
+        #self.wrapped_generator = Wrapper(generator)
+        #self.wrapped_projector = Wrapper(projector)
+        #self.wrapped_model     = Wrapper(model)
 
         #  Eval
         self.eval_freq = eval_freq
@@ -92,6 +100,7 @@ class Trainer:
         self.batch_size = batch_size
         self.iterations = iterations
         self.start_iteration = 0
+        self.cur_iter = 0
 
         # Floating-point precision
         self.mixed_precision = (
@@ -109,20 +118,11 @@ class Trainer:
         self.val_acc_metric = LossMetric()
         self.val_loss_metric = LossMetric()
 
+        #self.att_classifier = AttClsModel("resnet18").cuda().eval()
+        #self.att_classifier.load_state_dict(torch.load('/usr/WS2/olson60/research/latentclr/att_classifier.pt'))
+        self.multi_gpu = True
         # Best
         self.best_loss = -1
-        if dre_path != "":
-            self.dre_model = create_dre_model(layers=4)
-            self.dre_model.load_state_dict(torch.load(dre_path))
-        else:
-            self.dre_model = None
-        self.generator.model.custom_out_resolution = 128
-
-    def dre_loss(self, feats):
-        logits = F.softplus(dclamp(self.dre_model(feats),min=-50, max=50))
-        loss = -torch.log(logits)
-        return loss.mean()  
-
 
     def train(self) -> None:
         """Trains the model"""
@@ -131,11 +131,13 @@ class Trainer:
 
         epoch = 0
         iteration = self.start_iteration
-        while iteration < self.iterations + 1:
+        self._val_loop(epoch, 0)
+
+        while iteration < self.iterations:
             if iteration + self.eval_freq < self.iterations:
                 num_iters = self.eval_freq
             else:
-                num_iters = max(self.iterations - iteration, 1)
+                num_iters = self.iterations - iteration
 
             start_epoch_time = time.time()
             if self.mixed_precision:
@@ -169,51 +171,80 @@ class Trainer:
         pbar = tqdm.tqdm(total=iterations, leave=False)
         pbar.set_description(f"Epoch {epoch} | Train")
 
+        '''if self.multi_gpu:
+            self.model = DataParallelPassthrough(self.model)
+            self.generator = DataParallelPassthrough(self.generator)
+            self.projector = DataParallelPassthrough(self.projector)
+        '''
         # Set to train
         self.model.train()
+        self.model2.train()
 
         # Set to eval
         self.generator.eval()
+        
+        self.generator2.eval()
 
         if self.train_projector:
             self.projector.train()
         else:
             self.projector.eval()
 
+        #import pdb; pdb.set_trace()
         for i in range(iterations):
             # To device
-            z = self.generator.sample_latent(self.batch_size)
-            z = z.to(self.device)
-            z_orig = z
+            #z = self.wrapped_generator("sample_latent",self.batch_size)
+            z1 = self.generator.sample_latent(self.batch_size).to(self.device)
+            z1_orig = z1
+
+            z2 = self.generator2.sample_latent(self.batch_size).to(self.device)
+            z2_orig = z2
+
+            
 
             # Original features
             with torch.no_grad():
-                orig_feats = self.generator.get_features(z)
-                orig_feats = self.projector(orig_feats)
+                orig_feats1 = self.generator.get_features(z1)
+                #orig_feats1 = self.projector(orig_feats1, which_cnn=1)
+
+                orig_feats2 = self.generator2.get_features(z2)
+                #orig_feats2 = self.projector(orig_feats2, which_cnn=2)
+                #orig_feats = self.att_classifier(orig_feats)
 
             # Apply Directions
             self.optimizer.zero_grad()
+
+
+            # Forward
+            z1 = self.model(z1)
             #import pdb; pdb.set_trace()
-            z, z_nograd = self.model(z)
-
-            # Get features
-            feats = self.generator.get_features(z)
-            feats = self.projector(feats)
-            with torch.no_grad():
-                feats_no_grad = self.generator.get_features(z_nograd)
-                feats_no_grad = self.projector(feats_no_grad)
-
-            dreloss = self.dre_loss(feats) if self.dre_model is not None else 0
-
-
-            feats =  torch.cat([feats, feats_no_grad],dim=0)
+            feats1 = self.projector(self.generator.get_features(z1)  - orig_feats1.repeat(self.model.batch_k,1,1,1), which_cnn=1)
             # Take feature divergence
-            feats = feats - orig_feats.repeat(self.model.k,1)
-            features = feats / torch.reshape(torch.norm(feats, dim=1), (-1, 1))
+            feats1 = feats1
+            features1 = feats1 / torch.reshape(torch.norm(feats1, dim=1), (-1, 1))
 
+
+            z2 = self.model2(z2,self.model.selected_k)
+            feats2 = self.projector(self.generator.get_features(z2) - orig_feats2.repeat(self.model.batch_k,1,1,1), which_cnn=2)
+
+            # Take feature divergence
+            feats2 = feats2
+            features2 = feats2 / torch.reshape(torch.norm(feats2, dim=1), (-1, 1))
+
+
+            #import pdb; pdb.set_trace()
             # Loss
-            acc, loss = self.loss_fn(features)
-            loss = loss + dreloss
+            
+            both_feats = torch.cat([features1,features2])
+            acc, loss = self.loss_fn(both_feats, self.model.selected_k < self.overlap_k)
+            
+
+            self.writer.add_scalar("cur_acc", acc.item(), self.cur_iter)
+            self.writer.add_scalar("cur_loss", loss.item(), self.cur_iter)
+            self.cur_iter+=1
+
+            #acc = acc1+acc2+acc3
+            #loss = loss_overlap + loss_unique1 + loss_unique2
             loss.backward()
 
             if self.grad_clip_max_norm is not None:
@@ -225,13 +256,13 @@ class Trainer:
             self.scheduler.step()
 
             # Update metrics
-            self.train_acc_metric.update(acc.item(), z.shape[0])
-            self.train_loss_metric.update(loss.item(), z.shape[0])
+            self.train_acc_metric.update(acc.item(), z1.shape[0])
+            self.train_loss_metric.update(loss.item(), z1.shape[0])
 
             # Update progress bar
             pbar.update()
             pbar.set_postfix_str(
-                f"Acc: {acc.item():.3f} Loss: {loss.item():.3f}", refresh=False
+                f"Acc: {acc.item():.3f} Loss: {loss.item():.3f} ", refresh=False
             )
 
         pbar.close()
@@ -264,7 +295,7 @@ class Trainer:
             with autocast():
                 # Original features
                 with torch.no_grad():
-                    orig_feats = self.generator.get_features(z)#
+                    orig_feats = self.generator.get_features(z)
                     orig_feats = self.projector(orig_feats)
 
                 # Apply Directions
@@ -290,6 +321,7 @@ class Trainer:
                 # Loss
                 acc, loss = self.loss_fn(features)
 
+            #import pdb; pdb.set_trace()
             # Backward pass with scaler
             self.scaler.scale(loss).backward()
 
@@ -314,11 +346,11 @@ class Trainer:
             # Update progress bar
             pbar.update()
             pbar.set_postfix_str(
-                f"Acc: {acc.item():.3f} Loss: {loss.item():.3f} ", refresh=False
+                f"Acc: {acc.item():.3f} Loss: {loss.item():.3f}", refresh=False
             )
 
         pbar.close()
-
+    @torch.no_grad()
     def _val_loop(self, epoch: int, iterations: int) -> None:
         """
         Standard validation loop
@@ -338,38 +370,43 @@ class Trainer:
 
         # Loop
         for i in range(iterations):
-            with torch.no_grad():
                 # To device
-                z = self.generator.sample_latent(self.batch_size)
-                z = z.to(self.device)
-                z_orig = z
+                z1 = self.generator.sample_latent(self.batch_size).to(self.device)
+                z1_orig = z1
+
+                z2 = self.generator2.sample_latent(self.batch_size).to(self.device)
+                z2_orig = z2
+
+                
 
                 # Original features
                 with torch.no_grad():
-                    orig_feats = self.generator.get_features(z)
-                    orig_feats = self.projector(orig_feats)
+                    orig_feats1 = self.generator.get_features(z1)
+                    #orig_feats1 = self.projector(orig_feats1, which_cnn=1)
+
+                    orig_feats2 = self.generator2.get_features(z2)
+                    #orig_feats2 = self.projector(orig_feats2, which_cnn=2)
+                    #orig_feats = self.att_classifier(orig_feats)
 
                 # Apply Directions
-                self.optimizer.zero_grad()
-                #import pdb; pdb.set_trace()
-                z, z_nograd = self.model(z)
-
-                # Get features
-                feats = self.generator.get_features(z)
-                feats = self.projector(feats)
-                with torch.no_grad():
-                    feats_no_grad = self.generator.get_features(z_nograd)
-                    feats_no_grad = self.projector(feats_no_grad)
+                z1 = self.model(z1)
+                z2 = self.model2(z2,self.model.selected_k)
 
 
+                # Forward
+                features_1_2_list = []
+                for generator, z, orig_feats,which_cnn in zip([self.generator, self.generator2], [z1,z2],[orig_feats1,orig_feats2],[1,2]):
+                    feats = generator.get_features(z) - orig_feats.repeat(self.model.batch_k,1,1,1)
+                    feats = self.projector(feats, which_cnn=which_cnn)
 
-                feats =  torch.cat([feats, feats_no_grad],dim=0)
-                # Take feature divergence
-                feats = feats - orig_feats.repeat(self.model.k,1)
-                features = feats / torch.reshape(torch.norm(feats, dim=1), (-1, 1))
+                    # Take feature divergence
+                    feats = feats
+                    features = feats / torch.reshape(torch.norm(feats, dim=1), (-1, 1))
 
-                # Loss
-                acc, loss = self.loss_fn(features)
+                    features_1_2_list.append(features)
+
+                acc, loss = self.loss_fn(torch.cat([features_1_2_list[0],features_1_2_list[1]]), self.model.selected_k < self.overlap_k)
+            
                 self.val_acc_metric.update(acc.item(), z.shape[0])
                 self.val_loss_metric.update(loss.item(), z.shape[0])
 
@@ -391,28 +428,19 @@ class Trainer:
 
         # Save model
         if self.save_path is not None:
-            #self._save_model(os.path.join(self.save_path, "most_recent.pt"), iteration)
-            self._save_cosines(self.model , f"cosine.png")
+            self._save_model(os.path.join(self.save_path, "most_recent.pt"), iteration)
+            #self._save_model(os.path.join(self.save_path, f"iteration{iteration}.pt"), iteration)
 
         eval_loss = self.val_loss_metric.compute()
         if self.best_loss == -1 or eval_loss < self.best_loss:
             self.best_loss = eval_loss
-            #self._save_model(os.path.join(self.save_path, "best_model.pt"), iteration)
-            self._save_cosines(self.model , f"cosine_best.png")
+            self._save_model(os.path.join(self.save_path, "best_model.pt"), iteration)
 
         # Clear metrics
         self.train_loss_metric.reset()
         self.train_acc_metric.reset()
         self.val_loss_metric.reset()
         self.val_acc_metric.reset()
-
-    def _save_cosines(self, model, filename):
-        params = model.get_params()
-        if params is None: return
-        plt.matshow(cosine_similarity(params) - np.identity(model.k))
-        plt.colorbar()
-        plt.savefig(os.path.join(self.save_path, filename))
-        plt.clf()
 
     def _epoch_str(self, epoch: int, epoch_time: float):
         s = f"Epoch {epoch} "
@@ -437,6 +465,7 @@ class Trainer:
             "iteration": iteration + 1,
             "optimizer": self.optimizer.state_dict(),
             "model": self.model.state_dict(),
+            "model2": self.model2.state_dict() ,
             "projector": self.projector.state_dict(),
             "scheduler": self.scheduler.state_dict()
             if self.scheduler is not None
@@ -448,6 +477,7 @@ class Trainer:
     def _load_from_checkpoint(self, checkpoint_path: str) -> None:
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
         self.model.load_state_dict(checkpoint["model"])
+        self.model2.load_state_dict(checkpoint["model2"])
         self.projector.load_state_dict(checkpoint["projector"])
         self.optimizer.load_state_dict(checkpoint["optimizer"])
 
@@ -466,30 +496,69 @@ class Trainer:
             f"Checkpoint loaded, resuming from iteration {self.start_iteration}"
         )
 
-from torch.cuda.amp import custom_bwd, custom_fwd
-class DifferentiableClamp(torch.autograd.Function):
-    """
-    In the forward pass this operation behaves like torch.clamp.
-    But in the backward pass its gradient is 1 everywhere, as if instead of clamp one had used the identity function.
-    """
 
-    @staticmethod
-    @custom_fwd
-    def forward(ctx, input, max, min):
-        if min is None: return input.clamp(max=max)
-        if max is None: return input.clamp(min=min)
-        return input.clamp(max=max, min = min)
 
-    @staticmethod
-    @custom_bwd
-    def backward(ctx, grad_output):
-        return grad_output.clone(), None, None
+from torchvision import models
+import torch
+import torch.nn as nn
 
-def dclamp(input, max=None, min=None):
-    """
-    Like torch.clamp, but with a constant 1-gradient.
-    :param input: The input that is to be clamped.
-    :param min: The minimum value of the output.
-    :param max: The maximum value of the output.
-    """
-    return DifferentiableClamp.apply(input, max, min)
+class Wrapper(nn.Module):
+    def __init__(self, model):
+        super(Wrapper, self).__init__()
+        self.model = DataParallelPassthrough(model)
+
+    def forward(self, func_name, *inputs):
+        class_method = getattr(self.model, func_name)
+        return class_method(*inputs)
+
+#B = DistributedDataParallel(Wrapper(), ...)
+
+class DataParallelPassthrough(nn.DataParallel):
+    def __getattr__(self, name):
+        try:
+            return super(DataParallelPassthrough, self).__getattr__(name)
+        except AttributeError:
+            return getattr(self.module, name)
+
+class AttClsModel(nn.Module):
+    def __init__(self, model_type):
+        super(AttClsModel, self).__init__()
+        if model_type == 'resnet50':
+            self.backbone = models.resnet50(pretrained=True)
+            hidden_size = 2048
+        elif model_type == 'resnet34':
+            self.backbone = models.resnet34(pretrained=True)
+            hidden_size = 512
+        elif model_type == 'resnet18':
+            self.backbone = models.resnet18(pretrained=True)
+            hidden_size = 512
+        else:
+            raise NotImplementedError
+        #self.lambdas = torch.ones((40,), device=device)
+        self.val_loss = []  # max_len == 2*k
+        self.fc = nn.Linear(hidden_size, 40)
+        self.dropout = nn.Dropout(0.5)
+
+    def backbone_forward(self, x):
+        x = self.backbone.conv1(x)
+        x = self.backbone.bn1(x)
+        x = self.backbone.relu(x)
+        x = self.backbone.maxpool(x)
+
+        x = self.backbone.layer1(x)
+        x = self.backbone.layer2(x)
+        x = self.backbone.layer3(x)
+        #x = self.backbone.layer4(x)
+
+        #x = self.backbone.avgpool(x)
+
+        return x
+
+    def forward(self, input, labels=None):
+        x = self.backbone_forward(input)
+        x = torch.flatten(x, 1)
+        #x = self.dropout(x)
+        #x = self.fc(x)
+
+        return x
+        

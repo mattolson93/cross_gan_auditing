@@ -211,7 +211,7 @@ class MappingNetwork(torch.nn.Module):
         if num_ws is not None and w_avg_beta is not None:
             self.register_buffer('w_avg', torch.zeros([w_dim]))
 
-    def forward(self, z, c, truncation_psi=1, truncation_cutoff=None, skip_w_avg_update=False):
+    def forward(self, z, c=None, truncation_psi=1, truncation_cutoff=None, skip_w_avg_update=False):
         # Embed, normalize, and concat inputs.
         x = None
         with torch.autograd.profiler.record_function('input'):
@@ -247,6 +247,7 @@ class MappingNetwork(torch.nn.Module):
                 else:
                     x[:, :truncation_cutoff] = self.w_avg.lerp(x[:, :truncation_cutoff], truncation_psi)
         return x
+
 
     def forward_w_only(self, z, c, truncation_psi=1, truncation_cutoff=None, skip_w_avg_update=False):
         # Embed, normalize, and concat inputs.
@@ -462,6 +463,7 @@ class SynthesisBlock(torch.nn.Module):
 @persistence.persistent_class
 class SynthesisNetwork(torch.nn.Module):
     def __init__(self,
+        split_map_dict,
         w_dim,                      # Intermediate latent (W) dimensionality.
         img_resolution,             # Output image resolution.
         img_channels,               # Number of color channels.
@@ -480,6 +482,9 @@ class SynthesisNetwork(torch.nn.Module):
         channels_dict = {res: min(channel_base // res, channel_max) for res in self.block_resolutions}
         fp16_resolution = max(2 ** (self.img_resolution_log2 + 1 - num_fp16_res), 8)
 
+        self.split_resolution = 8
+        self.new_ws_ind = 0
+
         self.num_ws = 0
         for res in self.block_resolutions:
             in_channels = channels_dict[res // 2] if res > 4 else 0
@@ -491,15 +496,27 @@ class SynthesisNetwork(torch.nn.Module):
             self.num_ws += block.num_conv
             if is_last:
                 self.num_ws += block.num_torgb
-            setattr(self, f'b{res}', block)
-        self.save_block = ""
-        self.save_block_output = None
 
-    
+            if res == self.split_resolution: 
+                self.new_ws_ind = self.num_ws
+                self.split_block  = SynthesisBlock(out_channels, out_channels, w_dim=w_dim, resolution=res,
+                    img_channels=img_channels, is_last=is_last, use_fp16=use_fp16, **block_kwargs).conv1
+                #self.num_ws += self.split_block.num_conv
+                self.splitsize = 1 #self.split_block.num_conv + self.split_block.num_torgb
+
+
+            setattr(self, f'b{res}', block)
+
+        split_num_ws = self.num_ws - self.new_ws_ind + self.splitsize
+        self.split_map   = MappingNetwork(z_dim=w_dim, c_dim=0, w_dim=w_dim, num_ws=split_num_ws, **split_map_dict)
 
     def forward(self, ws, block_out='', **block_kwargs):
         block_ws = []
         with torch.autograd.profiler.record_function('split_ws'):
+            new_ws = self.split_map(ws[:,0], skip_w_avg_update=True)
+            #self.split_block.num_conv
+            ws = torch.cat([ws[:,:self.new_ws_ind], new_ws[:,self.splitsize:]], dim=1)
+            
             misc.assert_shape(ws, [None, self.num_ws, self.w_dim])
             ws = ws.to(torch.float32)
             w_idx = 0
@@ -507,17 +524,17 @@ class SynthesisNetwork(torch.nn.Module):
                 block = getattr(self, f'b{res}')
                 block_ws.append(ws.narrow(1, w_idx, block.num_conv + block.num_torgb))
                 w_idx += block.num_conv
-
+        #
         x = img = None
         for i, (res, cur_ws) in enumerate(zip(self.block_resolutions, block_ws)):
             block = getattr(self, f'b{res}')
             x, img = block(x, img, cur_ws, **block_kwargs)
             if img.shape[-1] == block_out: break
-
             if i == 0 and 'conv1' == block_out: return x
-            if f'block_{i}' == block_out: return x
-            if f'block_{i}' == self.save_block: self.save_block_output = x
-
+            
+            if res == self.split_resolution:
+                #import pdb; pdb.set_trace()
+                x = self.split_block(x, new_ws[:,0], fused_modconv=False)
         return img
 
 #----------------------------------------------------------------------------
@@ -539,15 +556,13 @@ class Generator(torch.nn.Module):
         self.w_dim = w_dim
         self.img_resolution = img_resolution
         self.img_channels = img_channels
-        self.synthesis = SynthesisNetwork(w_dim=w_dim, img_resolution=img_resolution, img_channels=img_channels, **synthesis_kwargs)
+        self.synthesis = SynthesisNetwork(split_map_dict = mapping_kwargs, w_dim=w_dim, img_resolution=img_resolution, img_channels=img_channels, **synthesis_kwargs)
         self.num_ws = self.synthesis.num_ws
         self.mapping = MappingNetwork(z_dim=z_dim, c_dim=c_dim, w_dim=w_dim, num_ws=self.num_ws, **mapping_kwargs)
 
-
-  
-    def forward(self, z, c, block_out="", truncation_psi=1, truncation_cutoff=None, **synthesis_kwargs):
+    def forward(self, z, c, truncation_psi=1, truncation_cutoff=None, **synthesis_kwargs):
         ws = self.mapping(z, c, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff)
-        img = self.synthesis(ws, block_out, **synthesis_kwargs)
+        img = self.synthesis(ws, **synthesis_kwargs)
         return img
 
 #----------------------------------------------------------------------------

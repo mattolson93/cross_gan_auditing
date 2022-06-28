@@ -17,13 +17,14 @@ class ContrastiveLoss(nn.Module):
         - Output: scalar
     """
 
-    def __init__(self, k: int, temp: float, abs: bool, reduce: str, otherweight: float) -> None:
+    def __init__(self, k: int, temp: float, abs: bool, reduce: str, otherweight: float, name="") -> None:
         super().__init__()
         self.k = k
         self.temp = temp
         self.abs = abs
         self.reduce = reduce
         self.otherweight = otherweight
+        self.name = name
         #         self.iter = 0
 
     def forward(self, out: torch.Tensor) -> torch.Tensor:

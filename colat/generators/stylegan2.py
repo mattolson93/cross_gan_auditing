@@ -29,6 +29,7 @@ sys.path.insert(1, str(module_path.resolve()))
 
 from model import Generator as StyleGAN2Model
 from networks import Generator as StyleGAN2Model2
+from splicenetworks import Generator as StyleGAN2Model2spliced
 
 from colat.utils.model_utils import download_ckpt
 
@@ -42,6 +43,7 @@ class StyleGAN2Generator(Generator):
         use_w: bool = False,
         feature_layer: str = "generator.layers.0",
         num_ws=12,
+        do_splice=False,
     ):
         super(StyleGAN2Generator, self).__init__(feature_layer=feature_layer)
         self.device = device
@@ -76,7 +78,10 @@ class StyleGAN2Generator(Generator):
             "afhqv2": 512 ,
             "afhqdog": 512 ,
             "afhqcat": 512 ,
-            "test": 512 ,
+            #https://github.com/happy-jihye/Cartoon-StyleGAN
+            "toon": 256 ,
+            "disney": 256 ,
+            "metfacesmall": 256 ,
         }
         new_downloaded = ["ffhq","ffhqsmall","ffhqusmall","metfacesu", "metfaces", "lsundog", "ffhqu", "celebahq", "brecahad", "afhqwild", "afhqv2", "afhqdog", "afhqcat"]
 
@@ -128,14 +133,18 @@ class StyleGAN2Generator(Generator):
             / f"stylegan2/stylegan2_{self.outclass}_{self.resolution}.pt"
         )
 
-        #import pdb; pdb.set_trace()
-
-        
 
         #import pdb; pdb.set_trace()
         if self.custom_stylegan2:
 
-            ckpt = torch.load(checkpoint)['G']
+            ckpt = torch.load(checkpoint)
+            if "G_ema" in ckpt.keys():
+                ckpt = ckpt['G_ema']
+            elif "g_ema" in ckpt.keys():
+                ckpt = ckpt['g_ema']
+            else:
+                ckpt = ckpt['G']
+
             z_dim = ckpt.z_dim
             c_dim = ckpt.c_dim
             w_dim = ckpt.w_dim
@@ -148,8 +157,11 @@ class StyleGAN2Generator(Generator):
             if "conv_clamp" in ckpt.synthesis.__dict__['_init_kwargs'].keys():
                 synthesis_kwargs["conv_clamp"] = ckpt.synthesis.__dict__['_init_kwargs']['conv_clamp'] 
 
-
-            self.model = StyleGAN2Model2(z_dim, c_dim, w_dim, img_resolution, img_channels, mapping_kwargs=mapping_kwargs, synthesis_kwargs=synthesis_kwargs).to(self.device)
+            do_splice = False
+            if do_splice:
+                self.model = StyleGAN2Model2spliced(z_dim, c_dim, w_dim, img_resolution, img_channels, mapping_kwargs=mapping_kwargs, synthesis_kwargs=synthesis_kwargs).to(self.device)
+            else:
+                self.model = StyleGAN2Model2(z_dim, c_dim, w_dim, img_resolution, img_channels, mapping_kwargs=mapping_kwargs, synthesis_kwargs=synthesis_kwargs).to(self.device)
             self.model.load_state_dict(ckpt.state_dict(), strict=True)
             '''if self.w_primary:
                 ws = []
@@ -167,10 +179,10 @@ class StyleGAN2Generator(Generator):
             #self.model = ckpt['G'].to(self.device)
             self.model.log_size = int(np.log2(img_resolution))
             self.latent_avg = self.model.mapping.w_avg.to(self.device)
+            self.model.synthesis.save_block = ''
 
         else:
             self.model = StyleGAN2Model(self.resolution, 512, 8).to(self.device)
-            zz = self.model.log_size
             if not checkpoint.is_file():
                 os.makedirs(checkpoint.parent, exist_ok=True)
                 print("you'll need to manually download the following file")
@@ -180,14 +192,40 @@ class StyleGAN2Generator(Generator):
 
             if self.outclass =="anime":
                 self.latent_avg = ckpt["truncation_latent"].to(self.device)
+            elif self.outclass =='toon' or self.outclass =='metfacesmall' or self.outclass =='disney':
+                ckpt = ckpt["g_ema"]
             else:
                 self.latent_avg = ckpt["latent_avg"].to(self.device)
                 ckpt = ckpt["g_ema"]
 
             self.model.load_state_dict(ckpt, strict=False)
+            self.save_block = ''
+
+        self.latent_avg, self.latent_std = self.calc_latent_avg()
+
+    @torch.no_grad()
+    def calc_latent_avg(self):
+        seed = 0
+        w = []
+        for i in range(100): w.extend(self.convert_z2w(self.get_rand_z(500, seed)))
+
+        stacked_w = torch.stack(w,dim=0)
+        w_mean = stacked_w.mean(0)
+        w_std  = stacked_w.std(0)
+
+        return w_mean, w_std
+
+    @torch.no_grad()
+    def truncate_w(self, ws, truncation_val):
+        if self.w_primary == False: exit("BAD CALL TO TRUNCATE W")
+
+        w_mins = self.latent_avg - (truncation_val*self.latent_std)
+        w_maxs = self.latent_avg + (truncation_val*self.latent_std)
+
+        return torch.min( torch.max(ws, w_mins), w_maxs)
 
 
-    def get_rand_z(self, n_samples):
+    def get_rand_z(self, n_samples, seed):
         rng = np.random.RandomState(seed)
         z = (
             torch.from_numpy(
@@ -239,6 +277,20 @@ class StyleGAN2Generator(Generator):
                 "StyleGAN2: cannot change output class without reloading"
             )
 
+    def save_intermediate(self, layer=""):
+        if self.custom_stylegan2:
+            self.model.synthesis.save_block = 'block_2' if layer == "" else layer
+        else:
+            self.save_block = 'convs.2'  if layer == "" else layer
+
+    def get_intermediate(self):
+        if self.custom_stylegan2:
+            return self.model.synthesis.save_block_output
+        else:
+            return self.model.save_block_output
+
+
+
     def forward(self, x):
         
         x = x if isinstance(x, list) or self.custom_stylegan2 else [x]
@@ -251,7 +303,7 @@ class StyleGAN2Generator(Generator):
             out, _ = self.model(
                 x,
                 noise=self.noise,
-                truncation=self.truncation,
+                truncation=1,
                 truncation_latent=self.latent_avg,
                 input_is_w=self.w_primary,
             )
@@ -328,23 +380,32 @@ class StyleGAN2Generator(Generator):
             if f"convs.{i-1}" in layer_name:
                 return out
 
+            if f"convs.{i-1}" in self.save_block: self.save_block_output = out
+
             out = conv2(out, latent[:, i + 1], noise=noise[noise_i + 1])
             if f"convs.{i}" in layer_name:
                 return out
+            
+            if f"convs.{i}" in self.save_block: self.save_block_output = out
 
             skip = to_rgb(out, latent[:, i + 2], skip)
             if f"to_rgbs.{i//2}" in layer_name:
                 return skip
 
-            if skip.shape[-1] == self.model.custom_out_resolution: return skip     
-            
 
             i += 2
             noise_i += 2
 
-        image = skip
+        #import pdb; pdb.set_trace()
+        if "full" == layer_name:
+            return skip
 
         raise RuntimeError(f"Layer {layer_name} not encountered in partial_forward")
+        '''outimg = ((skip + 1)/2).clip(0,1)
+        os.chdir("/usr/WS2/olson60/research/latentclr/")
+        from torchvision.utils import save_image
+        from torchvision.utils import make_grid
+        save_image(make_grid(outimg.cpu().detach()),"test.png")'''
 
     def set_noise_seed(self, seed):
         torch.manual_seed(seed)

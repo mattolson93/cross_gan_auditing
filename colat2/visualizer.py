@@ -11,6 +11,7 @@ from PIL import Image, ImageDraw, ImageFont
 from omegaconf.listconfig import ListConfig
 
 from colat.generators import Generator
+import os
 
 sign = lambda x: math.copysign(1, x)
 
@@ -21,7 +22,6 @@ class Visualizer:
     Args:
         model: model to be evaluated
         generator: pretrained generator
-        projector: pretrained projector
         device: device on which to evaluate model
         n_samples: number of samples
     """
@@ -30,7 +30,6 @@ class Visualizer:
         self,
         model: torch.nn.Module,
         generator: Generator,
-        projector: torch.nn.Module,
         device: torch.device,
         n_samples: Union[int, str],
         n_dirs: Union[int, List[int]],
@@ -38,7 +37,8 @@ class Visualizer:
         iterative: bool = True,
         feed_layers: Optional[List[int]] = None,
         image_size: Optional[Union[int, List[int]]] = None,
-        gen_ind: int = 0
+        gen_ind: int = 0,
+        w_min_max = None,
     ) -> None:
         # Logging
         self.logger = logging.getLogger()
@@ -50,11 +50,10 @@ class Visualizer:
         # Model
         self.model = model
         self.generator = generator
-        self.projector = projector
+        self.w_min_max = w_min_max
 
         # Set to eval
         self.generator.eval()
-        self.projector.eval()
         self.model.eval()
 
         # N Samples
@@ -90,6 +89,8 @@ class Visualizer:
         # Iterative
         self.iterative = iterative
 
+        if generator.resolution > 256:
+            image_size = 256
         # Image Size
         if image_size:
             self.image_transform = T.Resize(image_size)
@@ -99,7 +100,7 @@ class Visualizer:
         # Feed Layers
         self.feed_layers = feed_layers
 
-    def visualize(self) -> float:
+    def visualize(self, clamp_val=None, trainepoch = "") -> float:
         """Generates images from the trained model
 
         Returns:
@@ -112,7 +113,6 @@ class Visualizer:
 
         # Set to eval
         self.generator.eval()
-        self.projector.eval()
         self.model.eval()
 
         #  Helper function to edit latent codes
@@ -133,7 +133,7 @@ class Visualizer:
             return zs
 
         # Helper function to generate images
-        def _generate(zs, z=None):
+        def _generate(zs, z=None, w_min_max=None):
             # Manipulate only asked layers
             if self.feed_layers is not None and z is not None:
                 n_latent = self.generator.n_latent()
@@ -145,6 +145,8 @@ class Visualizer:
                     else:
                         zs_layers.append(z.expand(zs.shape[0], -1))
                 zs = zs_layers
+
+            zs = self.generator.truncate_w(zs, clamp_val) if clamp_val is not None else zs
 
             images = self.generator(zs).detach().cpu()
             return self.image_transform(images)
@@ -170,7 +172,7 @@ class Visualizer:
                     _alpha = alpha - prev_alpha if self.iterative else alpha
 
                     z = _edit(_z, _alpha, ks=self.dirs)
-                    images.append(_generate(z, z_orig))
+                    images.append(_generate(z, z_orig, w_min_max))
                     prev_alpha = alpha
 
                 # Reverse images
@@ -185,7 +187,8 @@ class Visualizer:
                     _alpha = alpha - prev_alpha if self.iterative else alpha
 
                     z = _edit(_z, _alpha, ks=self.dirs)
-                    images.append(_generate(z, z_orig))
+                    #import pdb; pdb.set_trace()
+                    images.append(_generate(z, z_orig, self.w_min_max))
                     prev_alpha = alpha
 
                 #  Prepare final image
@@ -254,8 +257,17 @@ class Visualizer:
                 imgs_grid = torch.cat([img_alpha, imgs_grid], dim=-2)
                 imgs_grid = torch.cat([img_k, imgs_grid], dim=-1)
 
-                torchvision.utils.save_image(imgs_grid, f"sample_{i}_{self.gen_ind}.png")
 
+                prefix = "" if clamp_val is None else f"t{clamp_val}_"
+                if trainepoch != "":
+                    parent_dir = "train_samples"
+                    os.makedirs(parent_dir, exist_ok=True)
+                    path = os.path.join(parent_dir, f"{prefix}e{trainepoch}_sample_{i}_{self.gen_ind}.png")
+                else:
+                    path = f"{prefix}sample_{i}_{self.gen_ind}.png"
+
+                torchvision.utils.save_image(imgs_grid, path)
+                if trainepoch != "" and i > 1: break
                 # Update progress bar
                 pbar.update()
 

@@ -27,7 +27,7 @@ def train(cfg: DictConfig) -> None:
     # Use Hydra's instantiation to initialize directly from the config file
     #size = cfg.model.size if not cfg.generator.use_w else cfg.model.size * cfg.generator.num_ws
     model: torch.nn.Module = instantiate(cfg.model, k=cfg.k, batch_k=cfg.batch_k).to(device)
-    loss_fn: torch.nn.Module = instantiate(cfg.loss, k=min(cfg.batch_k, cfg.k)).to(device)
+    loss_fn: torch.nn.Module = instantiate(cfg.loss, k=cfg.k).to(device)
     generator: torch.nn.Module = instantiate(cfg.generator).to(device)
     projector: Projector = instantiate(cfg.projector).to(device)
 
@@ -110,28 +110,37 @@ def evaluate(cfg: DictConfig) -> None:
     device = get_device(cfg)
 
     # Model
-    model: torch.nn.Module = instantiate(cfg.model, k=cfg.k).to(device)
-    loss_fn: torch.nn.Module = instantiate(cfg.loss).to(device)
+    model: torch.nn.Module = instantiate(cfg.model, k=cfg.k, batch_k=cfg.batch_k).to(device)
+    #loss_fn: torch.nn.Module = instantiate(cfg.loss).to(device)
     generator: torch.nn.Module = instantiate(cfg.generator).to(device)
-    projector: torch.nn.Module = instantiate(cfg.projector).to(device)
+    #projector: torch.nn.Module = instantiate(cfg.projector).to(device)
 
     # Preload model
-    checkpoint_path = hydra.utils.to_absolute_path(cfg.checkpoint)
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(cfg.checkpoint, map_location=device)
     model.load_state_dict(checkpoint["model"])
-    projector.load_state_dict(checkpoint["projector"])
+    #projector.load_state_dict(checkpoint["projector"])
 
     evaluator = Evaluator(
         model=model,
-        loss_fn=loss_fn,
         generator=generator,
-        projector=projector,
         device=device,
         batch_size=cfg.hparams.batch_size,
         iterations=cfg.hparams.iterations,
-        feed_layers=cfg.feed_layers,
+        total_directions=cfg.k,
+        att_model_path=os.path.join(hydra.utils.get_original_cwd(),"att_classifier.pt")
     )
-    evaluator.evaluate()
+    score = evaluator.evaluate()
+
+    with open('entropy.txt', 'w') as f:       f.write(f"{score}")
+    with open(f"entropy_{score}", 'w') as f:  f.write("")
+
+    trunc_val = 1.0
+    score = evaluator.evaluate(trunc_val)
+
+    with open(f'entropy_t{trunc_val}.txt', 'w') as f:       f.write(f"{score}")
+    with open(f"entropy_t{trunc_val}_s{score}", 'w') as f:  f.write("")
+
+
 
 
 def generate(cfg: DictConfig) -> None:

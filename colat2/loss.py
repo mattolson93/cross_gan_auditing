@@ -17,7 +17,7 @@ class ContrastiveLoss(nn.Module):
         - Output: scalar
     """
 
-    def __init__(self, k: int, temp: float, abs: bool, reduce: str, otherweight: float) -> None:
+    def __init__(self, k: int, temp: float, abs: bool, reduce: str, otherweight: float, name: str, size=None) -> None:
         super().__init__()
         self.k = k
         self.temp = temp
@@ -26,7 +26,7 @@ class ContrastiveLoss(nn.Module):
         self.otherweight = otherweight
         #         self.iter = 0
 
-    def forward(self, feats1: torch.Tensor, feats2, overlap_inds, bs) -> torch.Tensor:
+    def forward(self, feats1: torch.Tensor, feats2, overlap_inds, bs, label_order=None) -> torch.Tensor:
         n_samples = len(feats1) + len(feats2)
         n_feats1 = len(feats1)
         #assert (n_samples % self.k) == 0, "Batch size is not divisible by given k!"
@@ -92,19 +92,41 @@ class ContrastiveLoss(nn.Module):
         loss = total_loss / total_pos
         return acc, loss
 
-        # pos and neg similarity and remove self similarity for pos
-        '''pos = sim.masked_select(mask * diag_mask).view(n_samples, -1)
-        neg = sim.masked_select(~mask).view(n_samples, -1)
 
-        if self.reduce == "mean":
-            pos = pos.mean(dim=-1)
-            neg = neg.mean(dim=-1)
-        elif self.reduce == "sum":
-            pos = pos.sum(dim=-1)
-            neg = neg.sum(dim=-1)
-        else:
-            raise ValueError("Only mean and sum is supported for reduce method")
+class ClassificationLoss(nn.Module):
 
-        acc = (pos > neg).float().mean()
-        loss = -torch.log(pos / neg).mean()
-        return acc, loss'''
+    def __init__(self, k: int, temp: float, abs: bool, reduce: str, otherweight: float, name: str, size: int) -> None:
+        super().__init__()
+        self.k = k
+        self.temp = temp
+        self.abs = abs
+        self.reduce = reduce
+        self.otherweight = otherweight
+        self.ce_loss = nn.CrossEntropyLoss().cuda()
+        #         self.iter = 0
+        self.model = nn.Linear(size, k*2).cuda()
+        self.optimizer = torch.optim.Adam( self.model.parameters(),lr=1e-2)
+
+    def forward(self, feats1: torch.Tensor, feats2, overlap_inds, bs, label_order=None) -> torch.Tensor:
+        self.optimizer.step()
+        self.optimizer.zero_grad()
+
+        #import pdb; pdb.set_trace()
+        #exit("need to do better labels")
+        feats = torch.cat([feats1,  feats2])
+
+        labels1 = label_order.repeat_interleave(bs)
+        labels2 = label_order
+        labels2[~overlap_inds] = labels2[~overlap_inds] + self.k
+        labels2 = labels2.repeat_interleave(bs)
+
+        labels = torch.cat([labels1, labels2]).cuda()
+        # similarity matrix
+        
+        logits = self.model(feats)
+        loss = self.ce_loss(logits, labels)
+
+        acc = (logits.argmax(dim=1) == labels).sum() / logits.shape[0]
+
+
+        return acc, loss

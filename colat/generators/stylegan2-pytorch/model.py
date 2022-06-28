@@ -469,11 +469,7 @@ class Generator(nn.Module):
 
         self.n_latent = self.log_size * 2 - 2
         self.strided_style = StridedStyle(self.n_latent)
-        self.custom_out_resolution = None
 
-    def set_global_resolution(self, res):
-        self.custom_out_resolution = res
-        self.which_rgb = int(math.log(res, 2)) - 2
 
     def make_noise(self):
         device = self.input.input.device
@@ -520,6 +516,7 @@ class Generator(nn.Module):
                 ]
 
         if truncation < 1:
+            print("accidently truncating, shouldnt be here in generators/stylegan2-pytorch/model.py")
             style_t = []
 
             for style in styles:
@@ -571,7 +568,6 @@ class Generator(nn.Module):
 
             i += 2
             #import pdb; pdb.set_trace()
-            if skip.shape[-1] == self.custom_out_resolution:  break
 
         image = skip
 

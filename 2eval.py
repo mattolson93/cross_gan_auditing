@@ -1,11 +1,11 @@
 import hydra
 from omegaconf import DictConfig
 
-import colat.runner as runner
-import colat.utils.log_utils as utils
+import colat2.runner as runner
+import colat2.utils.log_utils as utils
 
 
-@hydra.main(config_path="conf", config_name="eval")
+@hydra.main(config_path="conf", config_name="eval2")
 def eval(cfg: DictConfig):
     utils.display_config(cfg)
     runner.evaluate(cfg)

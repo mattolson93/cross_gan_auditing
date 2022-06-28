@@ -2,10 +2,19 @@ import logging
 from typing import List, Optional
 
 import torch
-import tqdm
+import torch.nn as nn
+from tqdm import tqdm
 
 from colat.generators import Generator
 from colat.metrics import LossMetric
+
+import torch.nn.functional as F
+import torch.nn as nn
+from torchvision import models
+from torchvision import transforms
+
+
+ATTS = ["5_o_Clock_Shadow","Arched_Eyebrows","Attractive","Bags_Under_Eyes","Bald","Bangs","Big_Lips","Big_Nose","Black_Hair","Blond_Hair","Blurry","Brown_Hair","Bushy_Eyebrows","Chubby","Double_Chin","Eyeglasses","Goatee","Gray_Hair","Heavy_Makeup","High_Cheekbones","Male","Mouth_Slightly_Open","Mustache","Narrow_Eyes","No_Beard","Oval_Face","Pale_Skin","Pointy_Nose","Receding_Hairline","Rosy_Cheeks","Sideburns","Smiling","Straight_Hair","Wavy_Hair","Wearing_Earrings","Wearing_Hat","Wearing_Lipstick","Wearing_Necklace","Wearing_Necktie","Young"]
 
 
 class Evaluator:
@@ -23,13 +32,12 @@ class Evaluator:
     def __init__(
         self,
         model: torch.nn.Module,
-        loss_fn: torch.nn.Module,
         generator: Generator,
-        projector: torch.nn.Module,
         device: torch.device,
         batch_size: int,
         iterations: int,
-        feed_layers: Optional[List[int]] = None,
+        att_model_path: str,
+        total_directions: int,
     ) -> None:
         # Logging
         self.logger = logging.getLogger()
@@ -39,19 +47,19 @@ class Evaluator:
 
         # Model
         self.model = model
-        self.loss_fn = loss_fn
         self.generator = generator
-        self.projector = projector
-        self.feed_layers = feed_layers
 
         # Iterations & batch size
         self.iterations = iterations
         self.batch_size = batch_size
+        self.total_directions = total_directions
 
         # Metrics
-        self.loss_metric = LossMetric()
+        self.att_classifier = AttClsModel().to(device)
+        self.att_classifier.load_state_dict(torch.load(att_model_path))
 
-    def evaluate(self) -> float:
+    @torch.no_grad()
+    def evaluate(self, truncate_val=None) -> float:
         """Evaluates the model
 
         Returns:
@@ -59,72 +67,82 @@ class Evaluator:
 
         """
 
-        # Progress bar
-        pbar = tqdm.tqdm(total=len(self.loader), leave=False)
-        pbar.set_description("Evaluating... ")
 
         # Set to eval
         self.generator.eval()
-        self.projector.eval()
         self.model.eval()
 
+        iters = int(self.iterations/(100*self.batch_size)) + 1
+
         # Loop
-        for i in range(self.iterations):
-            with torch.no_grad():
-                # To device
+        def cat(x1,x2): return torch.cat([x1, x2],dim=0)
+
+        #import pdb; pdb.set_trace()
+        entropy_by_direction = []
+        for k in tqdm(range(self.total_directions)):
+            att_diff_list = []
+            for i in tqdm(range(iters)):
                 z_orig = self.generator.sample_latent(self.batch_size)
-                z_orig = z_orig.to(self.device)
+                z_d_k = self.model.forward_single(z_orig, k)
+                if truncate_val is not None:
+                    z_orig = self.generator.truncate_w(z_orig, truncate_val)
+                    z_d_k  = self.generator.truncate_w(z_d_k, truncate_val)
 
-                # Original features
-                with torch.no_grad():
-                    orig_feats = self.generator.get_features(z_orig)
-                    orig_feats = self.projector(orig_feats)
 
-                # Apply Directions
-                z = self.model(z_orig)
+                #RETURNS A NORMAL IMAGE
+                all_stats = self.att_classifier(self.generator(cat(z_orig, z_d_k)))
+                orig_stats, d_stats = torch.split(all_stats, [z_orig.shape[0],z_d_k.shape[0]])
+                att_diff = torch.abs(orig_stats - d_stats)
+                att_diff_probs = F.softmax(att_diff, dim=1)
+                att_diff_entropy = -(att_diff_probs * torch.log(att_diff_probs)).mean(1)
+                att_diff_list.extend(att_diff_entropy)
 
-                # Forward
-                features = []
-                for j in range(z.shape[0] // self.batch_size):
-                    # Prepare batch
-                    start, end = j * self.batch_size, (j + 1) * self.batch_size
-                    z_batch = z[start:end, ...]
+            entropy_by_direction.append(torch.stack(att_diff_list).mean())
 
-                    # Manipulate only asked layers
-                    if self.feed_layers is not None:
-                        n_latent = self.generator.n_latent()
+        #import pdb; pdb.set_trace()
+        score = torch.stack(entropy_by_direction).mean().item() #0.03784 conv1, 0.0299 robust
+        return score#, torch.stack(entropy_by_direction)
 
-                        z_batch_layers = []
-                        for i in range(n_latent):
-                            if i in self.feed_layers:
-                                z_batch_layers.append(z_batch)
-                            else:
-                                z_batch_layers.append(z_orig)
-                        z_batch = z_batch_layers
 
-                    # Get features
-                    feats = self.generator.get_features(z_batch)
-                    feats = self.projector(feats)
 
-                    # Take feature divergence
-                    feats = feats - orig_feats
-                    feats = feats / torch.reshape(torch.norm(feats, dim=1), (-1, 1))
 
-                    features.append(feats)
-                features = torch.cat(features, dim=0)
+class AttClsModel(nn.Module):
+    def __init__(self):
+        super(AttClsModel, self).__init__()
+        self.backbone = models.resnet50(pretrained=False)
+        hidden_size = 2048
+        
+        #self.lambdas = torch.ones((40,), device=device)
+        self.resize = transforms.Resize(256)
+        
+        self.val_loss = []  # max_len == 2*k
+        self.fc = nn.Linear(hidden_size, 40)
+        self.dropout = nn.Dropout(0.5)
 
-                # Loss
-                acc, loss = self.loss_fn(features)
-                self.acc_metric.update(acc.item(), z_orig.shape[0])
-                self.loss_metric.update(loss.item(), z_orig.shape[0])
+    def backbone_forward(self, x):
+        x = self.backbone.conv1(x)
+        x = self.backbone.bn1(x)
+        x = self.backbone.relu(x)
+        x = self.backbone.maxpool(x)
 
-                # Update progress bar
-                pbar.update()
+        x = self.backbone.layer1(x)
+        x = self.backbone.layer2(x)
+        x = self.backbone.layer3(x)
+        x = self.backbone.layer4(x)
 
-        pbar.close()
+        x = self.backbone.avgpool(x)
 
-        acc = self.acc_metric.compute()
-        loss = self.loss_metric.compute()
-        self.logger.info(f"Acc: {acc:.4f} Loss: {loss:.4f}\n")
+        return x
 
-        return loss
+
+
+    def forward(self, x):
+        x = self.resize(x)
+        x = (x * 2) -1
+        x = self.backbone_forward(x)
+        x = torch.flatten(x, 1)
+        x = self.dropout(x)
+        x = self.fc(x)
+
+        return x
+        
