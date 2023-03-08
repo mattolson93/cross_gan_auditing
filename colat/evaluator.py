@@ -72,15 +72,21 @@ class Evaluator:
         self.generator.eval()
         self.model.eval()
 
-        iters = int(self.iterations/(100*self.batch_size)) + 1
+        iters = 4
 
         # Loop
         def cat(x1,x2): return torch.cat([x1, x2],dim=0)
 
         #import pdb; pdb.set_trace()
+        #breakpoint()
         entropy_by_direction = []
+        att_diff_by_direction = []
+        diveristy = []
         for k in tqdm(range(self.total_directions)):
             att_diff_list = []
+            att_diffs_list = []
+            att_prob_list = []
+
             for i in tqdm(range(iters)):
                 z_orig = self.generator.sample_latent(self.batch_size)
                 z_d_k = self.model.forward_single(z_orig, k)
@@ -93,14 +99,21 @@ class Evaluator:
                 all_stats = self.att_classifier(self.generator(cat(z_orig, z_d_k)))
                 orig_stats, d_stats = torch.split(all_stats, [z_orig.shape[0],z_d_k.shape[0]])
                 att_diff = torch.abs(orig_stats - d_stats)
+                att_diffs_list.extend(att_diff)
                 att_diff_probs = F.softmax(att_diff, dim=1)
                 att_diff_entropy = -(att_diff_probs * torch.log(att_diff_probs)).mean(1)
                 att_diff_list.extend(att_diff_entropy)
+                att_prob_list.extend(att_diff_probs)
 
             entropy_by_direction.append(torch.stack(att_diff_list).mean())
-
+            att_diff_by_direction.append(torch.stack(att_diffs_list).mean())
+            diveristy.append(torch.stack(att_prob_list).mean(0))
         #import pdb; pdb.set_trace()
-        score = torch.stack(entropy_by_direction).mean().item() #0.03784 conv1, 0.0299 robust
+        #most_changed_direction = torch.argmax(torch.tensor(att_diff_by_direction))
+        #with open(f'most_changed_dir_is_{most_changed_direction}.txt', 'w') as f:       f.write(f"{most_changed_direction}")
+        #exit()
+        #score = torch.stack(entropy_by_direction).mean().item() 
+        score = torch.stack(diveristy).std(0).mean().item()
         return score#, torch.stack(entropy_by_direction)
 
 

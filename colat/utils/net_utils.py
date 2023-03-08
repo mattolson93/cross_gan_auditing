@@ -12,7 +12,7 @@ from torchvision import models
 
 
 class DreModel(torch.nn.Module):
-    def __init__(self, size, do_avg_pool=False):
+    def __init__(self, size, do_avg_pool=False, do_softplus=True):
         super(DreModel, self).__init__()
 
         self.model1 = create_mlp(2,size, size*2,1, batchnorm=False)
@@ -20,17 +20,22 @@ class DreModel(torch.nn.Module):
         self.size = size
         self.softplus = torch.nn.Softplus()
         self.do_pool = do_avg_pool
+        self.do_softplus = do_softplus
         self.pool = nn.AvgPool2d(4) 
 
 
-
+    @torch.cuda.amp.autocast()
     def forward(self, x):
         #import pdb; pdb.set_trace()
         x = self.pool(x.reshape(-1,self.size,4,4)) if self.do_pool else x
         x = torch.flatten(x, 1)
         
-        logits1 = self.softplus(dclamp(self.model1(x),min=-50, max=50))
-        logits2 = self.softplus(dclamp(self.model2(x),min=-50, max=50))
+        logits1 = dclamp(self.model1(x),min=-50, max=50)
+        logits2 = dclamp(self.model2(x),min=-50, max=50)
+
+        if self.do_softplus:
+            logits1 = self.softplus(logits1)
+            logits2 = self.softplus(logits2)
 
         return torch.cat([logits1,logits2],dim=1)
 
@@ -55,26 +60,29 @@ class AttClsModel(torch.nn.Module):
         #sd = torch.load("/usr/WS2/olson60/research/latentclr/colat/utils/checkpoint_0100.pth.tar")['state_dict']
         #self.load_state_dict(sd, strict=False)
 
-        self.normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                     std=[0.229, 0.224, 0.225])
-        self.resnet_resize = transforms.Resize(128)
+        #self.normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+        #                             std=[0.229, 0.224, 0.225])
+        self.resnet_resize = None #transforms.Resize(128)
         self.val_loss = []  # max_len == 2*k
         self.fc = torch.nn.Linear(hidden_size, 40)
         self.dropout = torch.nn.Dropout(0.2)
         self.layers = layers
         self.is_dre = is_dre
+        if is_dre: exit("is_dre should never be true?")
         self.hidden_size = hidden_size
 
     def get_size(self): return self.hidden_size
 
     def preprocess_img(self, img):
         if self.is_dre: return img
-        typical_img = dclamp((0.5 * (img + 1)), min=0, max=1)
-        return self.resnet_resize(self.normalize(typical_img))
+
+        return self.do_preprocess(img)
+        #typical_img = dclamp((0.5 * (img + 1)), min=0, max=1)
+        #return self.resnet_resize(self.normalize(typical_img))
 
 
     def backbone_forward(self, x):
-        x = self.preprocess_img(x)
+        #x = self.preprocess_img(x)
         x = self.backbone.conv1(x)
         x = self.backbone.bn1(x)
         x = self.backbone.relu(x)
@@ -96,14 +104,15 @@ class AttClsModel(torch.nn.Module):
         x = self.backbone.layer4(x)
         if self.layers == i: return x
         i+=1
+        #breakpoint()
 
         x = self.backbone.avgpool(x.reshape(-1,self.hidden_size,4,4))
 
         return x
 
     def forward(self, input, labels=None):
-        x = self.backbone_forward(input)
         #import pdb; pdb.set_trace()
+        x = self.backbone_forward(input)
         #x = self.backbone.avgpool(x)
         x = torch.flatten(x, 1)
         if self.is_dre:
@@ -115,6 +124,13 @@ class AttClsModel(torch.nn.Module):
 import hydra
 #'/usr/WS2/olson60/research/latentclr/att_classifier.pt'    
 def create_resnet(name="resnet18", layers=4, load_path=""):
+    ret_transform = None
+    if "voynov" in name:
+        model = AttClsModel("resnet18", 5, is_pretrained=False)
+        model.backbone.conv1 = nn.Conv2d( 6, 64,kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
+        nn.init.kaiming_normal_(model.backbone.conv1.weight, mode='fan_out', nonlinearity='relu')
+        return model.cuda(), ret_transform
+
     assert 0 <= layers <= 5
     if "advbn" in load_path:
         model = advbn_resnet()
@@ -122,9 +138,10 @@ def create_resnet(name="resnet18", layers=4, load_path=""):
         for key in list(sd.keys()):
             sd[key.replace('module.', '')] = sd.pop(key)
         model.load_state_dict(sd)
-        return model.cuda().eval()
+        return model.cuda().eval(), ret_transform
     else:
         model = AttClsModel(name, layers)
+
 
     if load_path != "": 
 
@@ -133,14 +150,18 @@ def create_resnet(name="resnet18", layers=4, load_path=""):
         if 'att_class' in load_path and name != 'resnet50': 
             exit("att classifier needs resnet50")
         elif 'att_class' in load_path:
-            model.normalize = transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+            ret_transform = transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
         model.load_state_dict(torch.load(hydra.utils.to_absolute_path(load_path)))
-    return model.cuda().eval()
+
+
+    return model.cuda().eval(), ret_transform
+
 
 def create_dre_model(size, do_avg_pool=False): 
     return DreModel(size, do_avg_pool).cuda()
 
-        
+def create_bce_model(size, do_avg_pool=False): 
+    return DreModel(size, do_avg_pool, do_softplus=False).cuda()    
 
 
 
@@ -450,15 +471,17 @@ class ResNet(nn.Module):
                 elif isinstance(m, BasicBlock):
                     nn.init.constant_(m.bn2.weight, 0)
 
-        self.normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                     std=[0.229, 0.224, 0.225])
-        self.resnet_resize = transforms.Resize(128)
+        #self.normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+        #                             std=[0.229, 0.224, 0.225])
+        #self.resnet_resize = None #transforms.Resize(128)
+        #self.resize = transforms.CenterCrop(224)
+        #self.resnet_resize = transforms.CenterCrop(224)
 
     def get_size(self): return self.hidden_size
 
-    def preprocess_img(self, img):
+    '''def preprocess_img(self, img):
         typical_img = dclamp((0.5 * (img + 1)), min=0, max=1)
-        return self.resnet_resize(self.normalize(typical_img))
+        return self.resnet_resize(self.normalize(typical_img))'''
 
     def _make_layer(self, block, planes, blocks, stride=1, dilate=False):
         norm_layer = self._norm_layer
@@ -486,7 +509,6 @@ class ResNet(nn.Module):
         return layers
 
     def _forward_impl(self, x, stage='head', tag='clean'):
-        x = self.preprocess_img(x)
         x = self.feature_x(x)
         x = self.head(x, tag)
         return x

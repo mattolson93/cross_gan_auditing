@@ -77,6 +77,7 @@ class Evaluator:
 
         self.att_classifier = AttClsModel().to(device)
         self.att_classifier.load_state_dict(torch.load(att_model_path))
+        self.cos = nn.CosineSimilarity(dim=0, eps=1e-6)
 
     @torch.no_grad()
     def get_unique_attributes(self, gen, model, unique_directions):
@@ -125,6 +126,7 @@ class Evaluator:
         self.iterations = int(self.iterations / 10000) + 1
 
         overlap_direction_scores = []
+        overlap_direction_scores_cos = []
 
         for k in tqdm(range(self.num_overlap_directions)):
             #if k > 1: break
@@ -159,9 +161,11 @@ class Evaluator:
             att_diff_dist2 = torch.stack(att_diff_dist2)
 
             #average the stats array
-
-            cur_score = ((att_diff_dist1.mean(0) - att_diff_dist2.mean(0)) **2).mean()
+            a1 = att_diff_dist1.mean(0)
+            a2 = att_diff_dist2.mean(0)
+            cur_score = ((a1 - a2) **2).mean()
             overlap_direction_scores.append(cur_score)
+            overlap_direction_scores_cos.append(self.cos(a1,a2))
 
             #disentangled_score1_d1 = entropy(att_diff_d1_dist1)
 
@@ -204,7 +208,7 @@ class Evaluator:
 
 
 
-        return torch.stack(overlap_direction_scores).mean().item(), unique_score1, unique_score2
+        return torch.stack(overlap_direction_scores).mean().item(),torch.stack(overlap_direction_scores_cos).mean().item(), unique_score1, unique_score2
                 
     @torch.no_grad()
     def evaluate_entropy(self, model, generator, truncate_val=None) -> float:
@@ -251,6 +255,298 @@ class Evaluator:
         score = torch.stack(entropy_by_direction).mean().item() #0.03784 conv1, 0.0299 robust
         return score#, torch.stack(entropy_by_direction)
 
+
+
+
+class Evaluator2:
+    """Model evaluator
+
+    Args:
+        model: model to be evaluated
+        loss_fn: loss function
+        generator: pretrained generator
+        projector: pretrained projector
+        device: device on which to evaluate model
+        iterations: number of iterations
+    """
+
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        model2: torch.nn.Module,
+        generator: Generator,
+        generator2: Generator,
+        device: torch.device,
+        batch_size: int,
+        iterations: int,
+        num_unique_directions: int,
+        total_directions: int,
+        att_model_path: str,
+        w_min_max = None,
+    ) -> None:
+        # Logging
+        self.logger = logging.getLogger()
+
+        # Device
+        self.device = device
+
+        # Model
+        self.model = model
+        self.model2 = model2
+        self.generator = generator
+        self.generator2 = generator2
+
+        # Iterations & batch size
+        self.iterations = iterations
+        self.batch_size = batch_size 
+
+        self.num_unique_directions = num_unique_directions
+        self.total_directions = total_directions
+        self.num_overlap_directions = total_directions - num_unique_directions
+
+        # Metrics
+        #self.loss_metric = LossMetric()
+        self.query_dict = {
+            "celeba" :  [] ,
+            "female" :  [ATTS.index("Male")] ,
+            "male" :  [ATTS.index("Male")] ,
+            "nohat" :  [ATTS.index("Wearing_Hat")] ,
+            "noglass" :  [ATTS.index("Eyeglasses")] ,
+            "nobeard" :  [ATTS.index("No_Beard")] ,
+            "nobeardnohat" :  [ATTS.index("No_Beard"),ATTS.index("Wearing_Hat")] ,
+            "noglassnosmilenotie" :  [ATTS.index("Eyeglasses"),ATTS.index("Smiling"),ATTS.index("Wearing_Necktie")] ,
+        }
+
+
+        self.att_classifier = AttClsModel().to(device)
+        self.att_classifier.load_state_dict(torch.load(att_model_path))
+        self.cos = nn.CosineSimilarity(dim=0, eps=1e-6)
+
+    @torch.no_grad()
+    def get_unique_attributes(self, gen, model, unique_directions):
+        def cat(x1,x2): return torch.cat([x1, x2],dim=0)
+
+        #import pdb; pdb.set_trace()
+        att_diff_dict = []
+        for k in tqdm(unique_directions):
+            att_diff = []
+            for i in tqdm(range(self.iterations)):
+                z_orig = gen.sample_latent(self.batch_size)
+                z_d_k = model.forward_single(z_orig, k)
+
+                
+                all_stats = self.att_classifier(gen(cat(z_orig, z_d_k)))
+                orig_stats, d_stats = torch.split(all_stats, [z_orig.shape[0],z_d_k.shape[0]])
+                att_diff.extend(orig_stats - d_stats)
+
+            att_diff = torch.stack(att_diff)
+            att_diff_dict.append(att_diff.cpu())
+
+        return att_diff_dict
+
+
+
+
+    @torch.no_grad()
+    def evaluate(self) -> float:
+        """Evaluates the model
+
+        Returns:
+            (float) accuracy (on a 0 to 1 scale)
+
+        """
+
+        # Progress bar
+        #pbar.set_description("Evaluating... ")
+        def cat(x1,x2): return torch.cat([x1, x2],dim=0)
+
+        #import pdb; pdb.set_trace()
+        # Set to eval
+        self.generator.eval()
+        self.generator2.eval()
+        self.model.eval()
+        self.model2.eval()
+
+        self.batch_size = int(self.batch_size)
+        self.iterations = int(self.iterations / 10000) + 1
+
+        overlap_direction_scores = []
+        overlap_direction_scores_cos = []
+
+        directions1 = []
+        directions2 = []
+
+        for k in tqdm(range(self.total_directions)):
+            #if k > 1: break
+            att_diff_dist1 = []
+            att_diff_dist2 = []
+            # Loop
+            for i in tqdm(range(self.iterations)):
+                #load some original images from the generators
+                z1_orig = self.generator.sample_latent(self.batch_size).to(self.device)
+                z2_orig = self.generator2.sample_latent(self.batch_size).to(self.device)
+
+                z1_d_k = self.model.forward_single(z1_orig, k)
+                z2_d_k = self.model2.forward_single(z2_orig, k)
+
+                #load the given direction images
+                xs_1 = self.generator(cat(z1_orig, z1_d_k))
+                xs_2 = self.generator2(cat(z2_orig, z2_d_k))
+
+                #get all the stats
+                all_stats = self.att_classifier(cat(xs_1,xs_2))
+
+                #load to variables correctly
+                raw_stats1, raw_stats2 = torch.split(all_stats, [xs_1.shape[0],xs_2.shape[0]])
+                att_orig1, att_d_dist1 = torch.split(raw_stats1, [z1_orig.shape[0],z1_d_k.shape[0]])
+                att_orig2, att_d_dist2 = torch.split(raw_stats2, [z2_orig.shape[0],z2_d_k.shape[0]])
+
+                att_diff_dist1.extend(att_orig1 - att_d_dist1)
+                att_diff_dist2.extend(att_orig2 - att_d_dist2)
+            
+            #import pdb; pdb.set_trace()
+            att_diff_dist1 = torch.stack(att_diff_dist1)
+            att_diff_dist2 = torch.stack(att_diff_dist2)
+
+            #average the stats array
+            a1 = att_diff_dist1.mean(0)
+            a2 = att_diff_dist2.mean(0)
+            directions1.append(a1)
+            directions2.append(a2)
+            #cur_score = ((a1 - a2) **2).mean()
+            #overlap_direction_scores.append(cur_score)
+            #overlap_direction_scores_cos.append(self.cos(a1,a2))
+
+            #disentangled_score1_d1 = entropy(att_diff_d1_dist1)
+
+
+
+        
+        order1 = []
+        order2 = []
+        cos_scores = []
+        for k in range(self.total_directions):
+            best_score = -1000
+            for i in range(self.total_directions):
+                if i in order1: continue
+                for j in range(self.total_directions):
+                    if j in order2: continue
+
+
+                    score = self.cos(directions1[i],directions2[j])
+                    if score > best_score:
+                        best_score = score
+                        best_i = i
+                        best_j = j
+
+            order1.append(best_i)
+            order2.append(best_j)
+            cos_scores.append(best_score)
+
+
+        print(order1)
+        print(order2)
+        print(cos_scores)
+        #exit()
+        #import pdb; pdb.set_trace()
+        #print("here")
+        #raise ValueError("havent finished implementing this yet. Need to figure out how to choose # of directions for overlap and non-overlap")
+
+        #unique_directions = range(self.num_overlap_directions, self.total_directions)
+        att_diff_worst2best_1 = self.get_unique_attributes(self.generator, self.model, order1)
+        att_diff_worst2best_2 = self.get_unique_attributes(self.generator2, self.model2, order2)
+
+        #query_dict = self.query_dict 
+        #import pdb; pdb.set_trace()
+        cutoffs = [int(self.total_directions * i) for i in [.75, .5, .25, .125]]
+
+        unique_list1 = []
+        unique_list2 = []
+
+        for c in cutoffs:
+            g1_unique_queries = self.query_dict[self.generator2.outclass]
+            n1_queries = len(g1_unique_queries)
+            unique_score1 = 0.0
+            for query in g1_unique_queries:
+                best_rank = 0
+                for direction in att_diff_worst2best_1[-c:]:
+                    rankings = torch.sort(torch.abs(direction.mean(0)), descending=True)[1]
+                    cur_rank = 1/(rankings.tolist().index(query) + 1)
+                    best_rank = max(cur_rank, best_rank)
+
+                unique_score1 += best_rank
+
+            unique_score1 = unique_score1/n1_queries if n1_queries > 0 else 0.0
+            unique_list1.append(unique_score1)
+
+
+
+            g2_unique_queries = self.query_dict[self.generator.outclass]
+            n2_queries = len(g2_unique_queries)
+            unique_score2 = 0.0
+            for query in g2_unique_queries:
+                best_rank = 0
+                for direction in att_diff_worst2best_2[-c:]:
+                    rankings = torch.sort(torch.abs(direction.mean(0)), descending=True)[1]
+                    cur_rank = 1/(rankings.tolist().index(query) + 1)
+                    best_rank = max(cur_rank, best_rank)
+
+                unique_score2 += best_rank
+
+            unique_score2 = unique_score2/n2_queries if n2_queries > 0 else 0.0
+            unique_list2.append(unique_score2)
+
+        #breakpoint()
+        cosses = [torch.stack(cos_scores)[:-c].mean().item() for c in cutoffs]
+
+        return cutoffs, cosses, unique_list1, unique_list2
+
+        #return torch.stack(overlap_direction_scores).mean().item(),torch.stack(overlap_direction_scores_cos).mean().item(), unique_score1, unique_score2
+                
+    @torch.no_grad()
+    def evaluate_entropy(self, model, generator, truncate_val=None) -> float:
+        """Evaluates the model
+
+        Returns:
+            (float) accuracy (on a 0 to 1 sc ale)
+
+        """
+
+        bs = 128
+        # Set to eval
+        generator.eval()
+        model.eval()
+
+        iters = int(self.iterations/(100*bs)) + 1
+
+        # Loop
+        def cat(x1,x2): return torch.cat([x1, x2],dim=0)
+
+        #import pdb; pdb.set_trace()
+        entropy_by_direction = []
+        for k in tqdm(range(self.total_directions)):
+            att_diff_list = []
+            for i in tqdm(range(iters)):
+                z_orig = generator.sample_latent(bs)
+                z_d_k = model.forward_single(z_orig, k)
+                if truncate_val is not None:
+                    z_orig = generator.truncate_w(z_orig, truncate_val)
+                    z_d_k  = generator.truncate_w(z_d_k, truncate_val)
+
+
+                #RETURNS A NORMAL IMAGE
+                all_stats = self.att_classifier(generator(cat(z_orig, z_d_k)))
+                orig_stats, d_stats = torch.split(all_stats, [z_orig.shape[0],z_d_k.shape[0]])
+                att_diff = torch.abs(orig_stats - d_stats)
+                att_diff_probs = F.softmax(att_diff, dim=1)
+                att_diff_entropy = -(att_diff_probs * torch.log(att_diff_probs)).mean(1)
+                att_diff_list.extend(att_diff_entropy)
+
+            entropy_by_direction.append(torch.stack(att_diff_list).mean())
+
+        #import pdb; pdb.set_trace()
+        score = torch.stack(entropy_by_direction).mean().item() #0.03784 conv1, 0.0299 robust
+        return score#, torch.stack(entropy_by_direction)
 
 
 

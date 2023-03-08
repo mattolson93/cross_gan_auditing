@@ -1,0 +1,6 @@
+model:
+  size: 512
+
+projector:
+  size: 512
+  layers: 0

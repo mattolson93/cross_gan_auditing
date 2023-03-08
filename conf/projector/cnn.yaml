@@ -1,0 +1,6 @@
+# @package _group_
+_target_: colat.projectors.CNNProjector
+normalize: True
+size: 128
+layers: 0
+load_path: ""

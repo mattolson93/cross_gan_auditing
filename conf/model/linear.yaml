@@ -1,4 +1,4 @@
 # @package _group_
 _target_: colat.models.LinearConditional
 normalize: True
-alpha: 0.1
+alpha: 3.0

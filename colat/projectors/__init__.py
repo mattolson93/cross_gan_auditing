@@ -7,5 +7,7 @@ from colat.projectors.cnn import CNNProjector
 from colat.projectors.conv1x1 import Conv1x1Projector
 from colat.projectors.munit import MunitProjector
 from colat.projectors.vit import VitProjector
+from colat.projectors.clip import ClipProjector
 
-__all__ = [VitProjector, MunitProjector, IdentityProjector, LinearProjector, NonlinearProjector, ResNetProjector, CNNProjector, Conv1x1Projector]
+#__all__ = [VitProjector, MunitProjector, IdentityProjector, LinearProjector, NonlinearProjector, ResNetProjector, CNNProjector, Conv1x1Projector]
+__all__ = [VitProjector,ClipProjector,MunitProjector, IdentityProjector, LinearProjector, NonlinearProjector, ResNetProjector, CNNProjector, Conv1x1Projector]

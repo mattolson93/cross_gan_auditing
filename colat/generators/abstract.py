@@ -25,8 +25,8 @@ class Generator(AbstractBaseClass, torch.nn.Module):
         super(Generator, self).__init__()
         self.feature_layer = feature_layer
 
-    def get_features(self, z: torch.Tensor) -> torch.Tensor:
-        return self.partial_forward(z, self.feature_layer)
+    def get_features(self, z: torch.Tensor , **kwargs) -> torch.Tensor:
+        return self.partial_forward(z, self.feature_layer, **kwargs)
 
     @abstractmethod
     def n_latent(self) -> int:

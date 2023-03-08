@@ -4,4 +4,4 @@ device: cuda
 truncation: 0.7
 class_name: ffhq
 use_w: true
-feature_layer: conv1
+feature_layer: full

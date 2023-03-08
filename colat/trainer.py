@@ -13,7 +13,6 @@ from colat.generators import Generator
 from colat.metrics import LossMetric
 
 import matplotlib.pyplot as plt
-from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 from colat.utils.net_utils import create_dre_model
 
@@ -141,9 +140,9 @@ class Trainer:
             if self.mixed_precision:
                 self._train_loop_amp(epoch, num_iters)
             else:
-                self._train_loop(epoch, num_iters)
+                do_val = self._train_loop(epoch, num_iters)
 
-            self._val_loop(epoch, self.eval_iters)
+            if do_val: self._val_loop(epoch, self.eval_iters)
 
             epoch_time = time.time() - start_epoch_time
             self._end_loop(epoch, epoch_time, iteration)
@@ -157,7 +156,152 @@ class Trainer:
             os.path.join(self.save_path, "final_model.pt"), self.iterations
         )
 
+    def _custom_train_loop(self, epoch: int, iterations: int):
+        pbar = tqdm.tqdm(total=iterations, leave=False)
+        pbar.set_description(f"Epoch {epoch} | Train")
+
+
+
+        
+        if not (self.loss_fn.name == "voynov" or self.loss_fn.name == "hessian" or self.loss_fn.name == "jacobian"):
+            raise ValueError(f"loss func must be 'voynov' or 'hessian' or 'simclr' " )
+
+
+        #if isinstance(self.model.alpha, list) and self.loss_fn.name == "jacobian":
+        #    raise ValueError(f"model alphas need to be a 2 length list [-5,5] and not {self.model.alpha}" )
+        #elif not isinstance(self.model.alpha, list) and not self.loss_fn.name == "jacobian":
+        #    raise ValueError(f"model alphas need a single value (1 or 3) and not {self.model.alpha}" )
+
+        # Set to train
+        self.model.train()
+
+        # Set to eval
+        self.generator.eval()
+
+        if self.train_projector:
+            self.projector.train()
+        else:
+            self.projector.eval()
+
+        def fast_gram_schmidt(vv):
+            def gs(x, ys):
+                for y in ys:
+                    x = x - x.dot(y) / y.dot(y) * y
+                return x
+
+            nk = vv.size(0)
+            uu = [vv[0]]
+            for k in range(1, nk):
+                uu.append(gs(vv[k], uu))
+            uu = torch.stack(uu)
+            uu = uu.div(uu.pow(2).sum(dim=1, keepdim=True).pow(0.5))
+            return uu
+
+        acc = 0.0
+        #orthogonalize the 
+        with torch.no_grad(): self.model.params.copy_(fast_gram_schmidt(self.model.params))
+        self.optimizer.zero_grad()
+        #deformator1.linear.weight.data = F.normalize(deformator1.linear.weight.data,p=1, dim=1)
+
+        
+        if self.loss_fn.name == "voynov" and not hasattr(self, 'pred_model'):
+            self.pred_model = torch.nn.Linear(self.model.size, self.model.k).cuda() 
+            self.pred_model_eps = torch.nn.Linear(self.model.size, 1).cuda() 
+            self.pred_model_opt = torch.optim.Adam(list(self.pred_model.parameters()) + list(self.pred_model_eps.parameters()),lr=1e-2)
+            self.ce_loss = torch.nn.CrossEntropyLoss().cuda()
+
+
+        for i in range(iterations):
+
+            #get zs
+            #sample a few directions randomly
+            #epsilon = randomly sample the distances from [-alpha,alpha]
+
+            z = self.generator.sample_latent(self.batch_size).to(self.device)
+
+
+            
+
+            if self.loss_fn.name == "hessian": 
+                z_pos, z_neg = self.model(z, pos_and_neg=True)
+                epsilon= self.model.sampled_alphas
+
+                f_og  =  self.projector(self.generator(z)).repeat(self.model.batch_k,1)
+                f_pos =  self.projector(self.generator(z_pos))
+                f_neg =  self.projector(self.generator(z_neg))
+
+
+                loss = ((f_pos - (2 * f_og) + f_neg) / (epsilon ** 2)).mean()
+                loss.backward()
+                #breakpoint()
+
+            if self.loss_fn.name =='jacobian':
+
+
+                z_pos, _ = self.model(z)
+
+                f_og  =  self.projector(self.generator(z)).repeat(self.model.batch_k,1)
+                f_pos =  self.projector(self.generator(z_pos))
+
+                loss = ((f_pos - f_og) / self.model.sampled_alphas).mean()
+
+                loss.backward()
+
+            elif self.loss_fn.name == "voynov":
+                updated_z, _ = self.model(z)
+                labels = self.model.selected_k.repeat(self.batch_size).cuda()
+
+                orig_imgs = self.generator(z).repeat(self.model.batch_k,1,1,1)
+                updated_imgs = self.generator(updated_z)
+                pred_feats = self.projector(torch.cat([orig_imgs,updated_imgs], dim=1))
+
+                shift_prediction = self.pred_model_eps(pred_feats)
+                logits = self.pred_model(pred_feats)
+
+
+                #breakpoint()
+                logit_loss = self.ce_loss(logits, labels)
+                alpha_pred_loss = 0.25 * torch.abs(shift_prediction - self.model.sampled_alphas).mean()
+                loss = logit_loss + alpha_pred_loss
+
+                loss.backward()
+                self.pred_model_opt.step()
+                self.pred_model_opt.zero_grad()
+
+
+
+
+
+
+            if self.grad_clip_max_norm is not None:
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(), self.grad_clip_max_norm
+                )
+
+            self.optimizer.step()
+            self.scheduler.step()
+            self.optimizer.zero_grad()
+
+            with torch.no_grad(): self.model.params.copy_(fast_gram_schmidt(self.model.params))
+
+            # Update metrics
+            self.train_acc_metric.update(acc, z.shape[0])
+            self.train_loss_metric.update(loss.item(), z.shape[0])
+
+            # Update progress bar
+            pbar.update()
+            pbar.set_postfix_str(
+                f"Acc: {acc:.3f} Loss: {loss.item():.3f}", refresh=False
+            )
+
+        pbar.close()
+        return 'voynov' not in self.loss_fn.name
+
+
+
     def _train_loop(self, epoch: int, iterations: int) -> None:
+        if self.loss_fn.name != "simclr": return self._custom_train_loop(epoch,iterations)
+
         """
         Regular train loop
 
@@ -235,6 +379,7 @@ class Trainer:
             )
 
         pbar.close()
+        return True
 
     def _train_loop_amp(self, epoch: int, iterations: int) -> None:
         """
@@ -407,6 +552,8 @@ class Trainer:
         self.val_acc_metric.reset()
 
     def _save_cosines(self, model, filename):
+        from sklearn.metrics.pairwise import cosine_similarity
+
         params = model.get_params()
         if params is None: return
         plt.matshow(cosine_similarity(params) - np.identity(model.k))
@@ -437,7 +584,7 @@ class Trainer:
             "iteration": iteration + 1,
             "optimizer": self.optimizer.state_dict(),
             "model": self.model.state_dict(),
-            "projector": self.projector.state_dict(),
+            "projector": self.projector.state_dict() if self.train_projector else None,
             "scheduler": self.scheduler.state_dict()
             if self.scheduler is not None
             else None,
@@ -448,7 +595,7 @@ class Trainer:
     def _load_from_checkpoint(self, checkpoint_path: str) -> None:
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
         self.model.load_state_dict(checkpoint["model"])
-        self.projector.load_state_dict(checkpoint["projector"])
+        if self.train_projector: self.projector.load_state_dict(checkpoint["projector"])
         self.optimizer.load_state_dict(checkpoint["optimizer"])
 
         self.start_iteration = checkpoint["iteration"]

@@ -1,0 +1,5 @@
+model:
+  size: 512
+
+projector:
+  layers: 4

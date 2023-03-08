@@ -1,0 +1,7 @@
+# @package _group_
+_target_: colat.generators.StyleSwinGenerator
+device: cuda
+truncation: 1.0
+class_name: ffhq
+use_w: true
+feature_layer: full

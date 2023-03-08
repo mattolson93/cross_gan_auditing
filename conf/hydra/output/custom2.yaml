@@ -1,6 +1,6 @@
 # @package hydra
 run:
-  dir: experiments2/${generator.feature_layer}_${generator.class_name}_${generator2.class_name}_k${k}_a${model.alpha}_usew${generator.use_w}_temp${loss.temp}_oweight${loss.otherweight}_dre${dre_lamb}_${info}/${generator._target_}_${model._target_}_${projector._target_}${projector.layers}_trainproj${train_projector}/${now:%Y-%m-%d_%H-%M-%S}
+  dir: experiments2/${generator.feature_layer}_${generator.class_name}_${generator2.class_name}_k${k}_a${model.alpha}_usew${generator.use_w}_enc-${projector.name}_loss${loss.name}_oweight${loss.otherweight}_dre${dre_lamb}_${info}/${generator._target_}_${model._target_}_${projector._target_}${projector.layers}_trainproj${train_projector}${projector.load_path}/${now:%Y-%m-%d_%H-%M-%S}
 sweep:
   dir: outputs/multirun/${hydra.job.name}/${now:%Y-%m-%d_%H-%M-%S}
   subdir: ${hydra.job.num}_${hydra.job.override_dirname}

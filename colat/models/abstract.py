@@ -39,7 +39,12 @@ class Model(ABC, torch.nn.Module):
     def sample_alpha(self) -> float:
         if isinstance(self.alpha, float) or isinstance(self.alpha, int):
             return self.alpha
-        return np.random.uniform(self.alpha[0], self.alpha[1], size=1)[0]
+        rand_alpha = np.random.uniform(self.alpha[0], self.alpha[1], size=1)[0]
+        if -.5 < rand_alpha < 0:  rand_alpha = -.5
+        elif 0 <= rand_alpha < .5: rand_alpha = .5
+
+        self.sampled_alphas = rand_alpha
+        return self.sampled_alphas
 
     def post_process(self, dz: torch.Tensor) -> torch.Tensor:
         if self.normalize:

@@ -1,0 +1,11 @@
+defaults:
+  - model: global
+  - loss: contrastive
+  - generator: biggan
+  - projector: identity
+  - exps: default
+  - misc: eval_misc
+  - size: ${defaults.2.generator}_${defaults.3.projector} # change when Hydra 1.1 releases
+  - hydra/job_logging: custom2
+  - hydra/output: custom2
+  - hydra/run/dir: custom2

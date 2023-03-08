@@ -1,0 +1,10 @@
+defaults:
+  - model: global
+  - generator: biggan
+  - projector: identity
+  - misc: gen_misc
+  - exps: default
+  - size: ${defaults.1.generator}_${defaults.2.projector} # change when Hydra 1.1 releases
+  - hydra/job_logging: custom
+  - hydra/output: custom3
+  - hydra/run/dir: custom3

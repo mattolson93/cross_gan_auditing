@@ -99,6 +99,26 @@ def train(cfg: DictConfig) -> None:
     )
     visualizer.visualize()
 
+    evaluator = Evaluator(
+        model=model,
+        generator=generator,
+        device=device,
+        batch_size=cfg.hparams.batch_size,
+        iterations=cfg.hparams.iterations,
+        total_directions=cfg.k,
+        att_model_path=os.path.join(hydra.utils.get_original_cwd(),"att_classifier.pt")
+    )
+    score = evaluator.evaluate()
+
+    with open('entropy.txt', 'w') as f:       f.write(f"{score}")
+    with open(f"entropy_{score}", 'w') as f:  f.write("")
+
+    trunc_val = 1.0
+    score = evaluator.evaluate(trunc_val)
+
+    with open(f'entropy_t{trunc_val}.txt', 'w') as f:       f.write(f"{score}")
+    with open(f"entropy_t{trunc_val}_s{score}", 'w') as f:  f.write("")
+
 
 def evaluate(cfg: DictConfig) -> None:
     """Evaluates model from config
@@ -131,14 +151,14 @@ def evaluate(cfg: DictConfig) -> None:
     )
     score = evaluator.evaluate()
 
-    with open('entropy.txt', 'w') as f:       f.write(f"{score}")
-    with open(f"entropy_{score}", 'w') as f:  f.write("")
+    with open('diveristy.txt', 'w') as f:       f.write(f"{score}")
+    with open(f"diveristy_{score}", 'w') as f:  f.write("")
 
     trunc_val = 1.0
-    score = evaluator.evaluate(trunc_val)
+    #score = evaluator.evaluate(trunc_val)
 
-    with open(f'entropy_t{trunc_val}.txt', 'w') as f:       f.write(f"{score}")
-    with open(f"entropy_t{trunc_val}_s{score}", 'w') as f:  f.write("")
+    #with open(f'entropy_t{trunc_val}.txt', 'w') as f:       f.write(f"{score}")
+    #with open(f"entropy_t{trunc_val}_s{score}", 'w') as f:  f.write("")
 
 
 
@@ -162,7 +182,7 @@ def generate(cfg: DictConfig) -> None:
     # Preload model
     checkpoint = torch.load(cfg.checkpoint, map_location=device)
     model.load_state_dict(checkpoint["model"])
-    projector.load_state_dict(checkpoint["projector"])
+    #projector.load_state_dict(checkpoint["projector"])
 
     #import pdb; pdb.set_trace()
     #from sklearn.metrics.pairwise import cosine_similarity as cos
@@ -171,7 +191,6 @@ def generate(cfg: DictConfig) -> None:
     visualizer = Visualizer(
         model=model,
         generator=generator,
-        projector=projector,
         device=device,
         n_samples=cfg.n_samples,
         n_dirs=cfg.n_dirs,
@@ -181,6 +200,7 @@ def generate(cfg: DictConfig) -> None:
         image_size=cfg.image_size,
     )
     visualizer.visualize()
+    visualizer.visualize(.7)
 
 
 def get_device(cfg: DictConfig) -> torch.device:

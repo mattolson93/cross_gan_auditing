@@ -2,3 +2,4 @@
 _target_: colat.projectors.IdentityProjector
 normalize: True
 layers: 0
+load_path: ""

@@ -1,0 +1,6 @@
+# @package _group_
+_target_: colat.projectors.MunitProjector
+normalize: True
+layers: 4
+load_path: ""
+name: munit

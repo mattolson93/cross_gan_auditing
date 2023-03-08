@@ -18,7 +18,7 @@ from colat.loss import ContrastiveLoss
 
 
 import matplotlib.pyplot as plt
-from sklearn.metrics.pairwise import cosine_similarity
+#
 import numpy as np
 
 from torch.cuda.amp import custom_bwd, custom_fwd
@@ -235,6 +235,34 @@ class Trainer:
         #
         return l1.mean() + l2.mean()
 
+    def bce_loss_fn(self, feats1, feats2, overlap_inds, bs):
+        #import pdb; pdb.set_trace()
+        #unique indices should maximize the logit
+        #overlap should minimize the logit
+        unique_count = (~overlap_inds).sum() * bs
+        if unique_count == 0: return (torch.zeros(1) - .001 )[0].cuda()
+
+        unique_inds = (~overlap_inds).repeat_interleave(bs)
+
+        unique_feats = torch.cat([feats1[unique_inds], feats2[unique_inds]], dim=0)
+
+        dre_logit = torch.sigmoid(self.dre_model(unique_feats))
+
+        #using the DRE that calls dist 2 outliers, make sure these unique directions are small
+        l2 = dre_logit[unique_count:, 0] #dist1 is inlier, dist2 is outlier
+
+        #using the DRE that calls dist 1 outliers, make sure these unique directions are small
+        l1 = dre_logit[:unique_count, 1]
+
+
+        #l1 = -torch.log(1-pred1[unique_inds1]) * (pred1[unique_inds1] > .1)
+        #l2 = -torch.log(1-pred2[unique_inds2]) * (pred2[unique_inds2] > .1)
+        #outlier_loss = 0 if only_overlap else l1.mean() + l2.mean()
+
+        #print(inlier_loss, outlier_loss)
+        #
+        return l1.mean() + l2.mean()
+
 
    
 
@@ -283,8 +311,8 @@ class Trainer:
             ret1 = self.projector(x1, 1)
             ret2 = self.projector(x2, 2)
         else:
-            x1 = self.projector.resize(x1)
-            x2 = self.projector.resize(x2)
+            x1 = self.projector.transform_preprocess(x1)
+            x2 = self.projector.transform_preprocess(x2)
             ret = self.projector(torch.cat([x1,x2],dim=0))
             ret1, ret2 = torch.split(ret, [x1.shape[0],x2.shape[0]])
 
@@ -322,8 +350,28 @@ class Trainer:
 
         def cat(x1,x2): return torch.cat([x1, x2],dim=0)
 
-        #import pdb; pdb.set_trace()
+
+        gen1_kw = {"do_checkpoint":True} if "StyleGAN3" in self.generator.name else {}
+        gen2_kw = {"do_checkpoint":True} if "StyleGAN3" in self.generator2.name else {}
+
+        alternate_grads = "StyleGAN3" in self.generator.name and "StyleGAN3" in self.generator2.name
+
+
         for i in range(iterations):
+            if alternate_grads:
+                model1 = i % 2 == 0
+                model2 = not model1
+
+                gen1_kw = {}#{"do_checkpoint":True} if model1 else {}
+                gen2_kw = {}#{"do_checkpoint":True} if model2 else {}
+
+                for p in self.model.parameters(): p.requires_grad_(model1)
+                for p in self.generator.parameters(): p.requires_grad_(model1)
+
+                for p in self.model2.parameters(): p.requires_grad_(model2)
+                for p in self.generator2.parameters(): p.requires_grad_(model2)
+
+
             # To device
             #z = self.wrapped_generator("sample_latent",self.batch_size)
             with torch.no_grad():
@@ -332,6 +380,7 @@ class Trainer:
 
             # Apply Directions
             self.optimizer.zero_grad()
+            torch.cuda.empty_cache()
             #import pdb; pdb.set_trace()
             d1_grad, d1_nograd = self.model(z1_orig)
             d2_grad, d2_nograd = self.model2(z2_orig,self.model.selected_k, self.model.unselected_k)
@@ -339,10 +388,12 @@ class Trainer:
 
             # Original features
             with torch.no_grad():
-                gen_feats1_combo_nograd = self.generator.get_features( cat(z1_orig, d1_nograd))
+                gen_feats1_combo_nograd = self.generator.get_features( cat(z1_orig, d1_nograd), **gen1_kw)
+                torch.cuda.empty_cache()
                 if self.exp("selfclr_lamb") > 0: selfclr_feats_orig, _ = torch.split(self.generator.get_intermediate(), [z1_orig.shape[0],d1_nograd.shape[0]])
 
-                gen_feats2_combo_nograd = self.generator2.get_features(cat(z2_orig, d2_nograd))
+                gen_feats2_combo_nograd = self.generator2.get_features(cat(z2_orig, d2_nograd), **gen2_kw)
+                torch.cuda.empty_cache()
                 if self.exp("do_trans") > 0: gen_feats2_combo_nograd = self.trans(gen_feats2_combo_nograd)
                 
 
@@ -361,8 +412,14 @@ class Trainer:
                 diffed_features2_nograd = self.diff_norm_feats(feats1_nograd, orig_feats2, self.model.k - self.model.batch_k)
 
             
-            gen_feats1 = self.generator.get_features(d1_grad)
-            gen_feats2 = self.generator2.get_features(d2_grad)
+            if alternate_grads:
+                gen_feats2 = self.generator2.get_features(d2_grad, **gen2_kw)
+                gen_feats1 = self.generator.get_features(d1_grad, **gen1_kw)
+            else:
+                gen_feats1 = self.generator.get_features(d1_grad, **gen1_kw)
+                gen_feats2 = self.generator2.get_features(d2_grad, **gen2_kw)
+
+
             if self.exp("do_trans") > 0: gen_feats2 = self.trans(gen_feats2)
 
             # Forward
@@ -389,6 +446,11 @@ class Trainer:
                 loss_dre = self.dre_lamb * self.dre_loss_fn(feats1, feats2, self.model.selected_k< self.overlap_k, self.batch_size)
                 out_string += f" ldre: {loss_dre.item():.3f}"
                 loss += loss_dre 
+
+            if self.dre_lamb < 0:
+                loss_bce = -self.dre_lamb * self.bce_loss_fn(feats1, feats2, self.model.selected_k< self.overlap_k, self.batch_size)
+                out_string += f" lbce: {loss_bce.item():.3f}"
+                loss += loss_bce 
 
 
             if self.exp("recon") > 0:
@@ -445,7 +507,7 @@ class Trainer:
             self.train_acc_metric.update(acc.item(), f1.shape[0])
             self.train_loss_metric.update(loss.item(), f1.shape[0])
 
-       
+            torch.cuda.empty_cache()
             pbar.update()
             pbar.set_postfix_str(out_string, refresh=False)
 
@@ -555,6 +617,7 @@ class Trainer:
         self.val_acc_metric.reset()
 
     def _save_cosines(self, model, filename):
+        from sklearn.metrics.pairwise import cosine_similarity
         params = model.get_params()
         if params is None: return
         plt.matshow(cosine_similarity(params) - np.identity(model.k))

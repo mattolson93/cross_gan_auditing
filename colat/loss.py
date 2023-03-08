@@ -68,3 +68,5 @@ class ContrastiveLoss(nn.Module):
         acc = (pos > neg).float().mean()
         loss = -torch.log(pos / neg).mean()
         return acc, loss
+
+

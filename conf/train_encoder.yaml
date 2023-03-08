@@ -1,0 +1,17 @@
+defaults:
+  - model: linear
+  - loss: contrastive2
+  - generator: stylegan2
+  - projector: resnet
+  - generator2: stylegan2
+  - model2: linear
+  - hparams: default # change when Hydra 1.1 releases
+  - misc: train_misc
+  - size: ${defaults.2.generator}_${defaults.3.projector} # change when Hydra 1.1 releases
+  - hydra/job_logging: custom
+  - hydra/output: custom_encodertrain
+l2_lam: 0.01
+mse_lam: 1
+p_lam: 1
+clip: 0.01
+dropout: 0.5

@@ -1,0 +1,15 @@
+defaults:
+  - model: linear
+  - loss: contrastive2
+  - generator: stylegan2
+  - projector: resnet
+  - generator2: stylegan2
+  - generator3: stylegan2
+  - model2: linear
+  - model3: linear
+  - hparams: default # change when Hydra 1.1 releases
+  - exps: default
+  - misc: train_misc
+  - size: ${defaults.2.generator}_${defaults.3.projector} # change when Hydra 1.1 releases
+  - hydra/job_logging: custom
+  - hydra/output: custom3

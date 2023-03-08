@@ -1,0 +1,6 @@
+# @package _group_
+_target_: colat.projectors.VitProjector
+normalize: True
+layers: 4
+name: vit
+load_path: ""

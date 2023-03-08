@@ -10,12 +10,12 @@ eval_freq: 1000
 eval_iters: 100
 
 hparams:
-  batch_size: 32
+  batch_size: 2
   iterations: 10000
 
-k: 32 
-overlap_k: 4
-batch_k: 16
+k: 16 
+overlap_k: 12
+batch_k: 5
 info: ""
 dre_lamb: 0
 dre_path: ""
@@ -28,4 +28,5 @@ n_dirs: -1
 alphas: [1,2,3,6,10, 15]
 iterative: False 
 image_size: 128
+imgproc: resize
 

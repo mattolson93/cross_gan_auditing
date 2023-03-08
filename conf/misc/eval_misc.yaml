@@ -11,3 +11,4 @@ hparams:
 k: 32
 feed_layers: null
 train_projector: true
+cfg2: null

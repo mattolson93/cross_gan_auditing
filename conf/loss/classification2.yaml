@@ -1,0 +1,7 @@
+# @package _group_
+_target_: colat2.loss.ClassificationLoss
+temp: 0.5
+abs: False 
+reduce: mean
+otherweight: 0.1
+name: crossent

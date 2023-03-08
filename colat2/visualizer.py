@@ -58,7 +58,9 @@ class Visualizer:
 
         # N Samples
         if isinstance(n_samples, int):
-            self.samples = self.generator.sample_latent(n_samples)
+            self.samples = self.generator.sample_latent(n_samples, seed=0)
+            #self.samples = torch.stack([self.samples[i] for i in [2,4,23]])
+            #breakpoint()
             self.samples = self.samples.to(self.device)
         elif type(n_samples) is torch.Tensor:
             self.samples = n_samples.to(self.device)
@@ -149,7 +151,7 @@ class Visualizer:
             zs = self.generator.truncate_w(zs, clamp_val) if clamp_val is not None else zs
 
             images = self.generator(zs).detach().cpu()
-            return self.image_transform(images)
+            return torch.clamp(self.image_transform(images), min=0, max=1)
 
         # Loop
         with torch.no_grad():

@@ -1,5 +1,6 @@
 # @package _group_
 _target_: colat.projectors.ResNetProjector
-name: resnet18
+name: resnet50
 normalize: True
-layers: 4
+layers: 5
+load_path: ""

@@ -1,0 +1,6 @@
+# @package _group_
+_target_: colat.projectors.Conv1x1Projector
+normalize: True
+size: 512
+layers: 0
+load_path: ""

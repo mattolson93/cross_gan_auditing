@@ -25,11 +25,11 @@ sys.path.insert(1, str(module_path.resolve()))
 module_path = Path(__file__).parent / "stylegan2-ada"
 sys.path.insert(1, str(module_path.resolve()))
 
-#import pdb; pdb.set_trace()
+
 
 from model import Generator as StyleGAN2Model
 from networks import Generator as StyleGAN2Model2
-from splicenetworks import Generator as StyleGAN2Model2spliced
+#from splicenetworks import Generator as StyleGAN2Model2spliced
 
 from colat.utils.model_utils import download_ckpt
 
@@ -57,12 +57,11 @@ class StyleGAN2Generator(Generator):
             # Converted NVIDIA official
             "car": 512,
             "cat": 256,
-            "church": 256,
             "horse": 256,
             "anime": 512,
             # Tuomas
-            "bedrooms": 256,
-            "kitchen": 256,
+            #"bedrooms": 256,
+            #"kitchen": 256,
             "places": 256,
             #new dl from nvidia
             "ffhq": 1024,
@@ -82,9 +81,27 @@ class StyleGAN2Generator(Generator):
             "toon": 256 ,
             "disney": 256 ,
             "metfacesmall": 256 ,
-        }
-        new_downloaded = ["ffhq","ffhqsmall","ffhqusmall","metfacesu", "metfaces", "lsundog", "ffhqu", "celebahq", "brecahad", "afhqwild", "afhqv2", "afhqdog", "afhqcat"]
+            "valsuncat": 256 ,
+            "valsunchurch": 256 ,
+            "valsunhorse": 256 ,
+            "vaafhqwild": 512 ,
+            "vaafhqdog": 512 ,
+            "vaafhqcat": 512 ,
+            "lsunhorse": 256 ,
+            "lsunchurch": 256 ,
+            "lsuncat": 256 ,
+            "modernart": 512 ,
+            "mlpony": 1024 ,
+            "fursona": 512 ,
 
+            "kitchen256": 256 ,
+            "bedroom256": 256 ,
+            "tower256": 256 ,
+        }
+
+        new_downloaded = ["ffhq","ffhqsmall","ffhqusmall","metfacesu", "metfaces", "lsundog", "ffhqu", "celebahq", "brecahad", "afhqwild", "afhqv2", "afhqdog", "afhqcat"]
+        new_downloaded+= ["valsuncat", "valsunchurch", "valsunhorse", "vaafhqwild", "vaafhqdog", "vaafhqcat", "lsunhorse", "lsunchurch", "lsuncat", "modernart", "mlpony", "fursona", ]
+        new_downloaded+= ["kitchen256", "bedroom256", "tower256" ]
         #assert (
         #    self.outclass in configs
         #), f'Invalid StyleGAN2 class {self.outclass}, should be one of [{", ".join(configs.keys())}]'
@@ -97,7 +114,7 @@ class StyleGAN2Generator(Generator):
         self.set_noise_seed(0)
 
     def n_latent(self):
-        return self.model.n_latent
+        return 512
 
     def latent_space_name(self):
         return "W" if self.w_primary else "Z"
@@ -145,6 +162,7 @@ class StyleGAN2Generator(Generator):
             else:
                 ckpt = ckpt['G']
 
+            #breakpoint()
             z_dim = ckpt.z_dim
             c_dim = ckpt.c_dim
             w_dim = ckpt.w_dim
@@ -162,6 +180,8 @@ class StyleGAN2Generator(Generator):
                 self.model = StyleGAN2Model2spliced(z_dim, c_dim, w_dim, img_resolution, img_channels, mapping_kwargs=mapping_kwargs, synthesis_kwargs=synthesis_kwargs).to(self.device)
             else:
                 self.model = StyleGAN2Model2(z_dim, c_dim, w_dim, img_resolution, img_channels, mapping_kwargs=mapping_kwargs, synthesis_kwargs=synthesis_kwargs).to(self.device)
+            
+            #import pdb; pdb.set_trace()
             self.model.load_state_dict(ckpt.state_dict(), strict=True)
             '''if self.w_primary:
                 ws = []
@@ -189,14 +209,18 @@ class StyleGAN2Generator(Generator):
                 self.download_checkpoint(checkpoint)
                 
             ckpt = torch.load(checkpoint)
-
             if self.outclass =="anime":
                 self.latent_avg = ckpt["truncation_latent"].to(self.device)
-            elif self.outclass =='toon' or self.outclass =='metfacesmall' or self.outclass =='disney':
+            elif self.outclass =='toon' or self.outclass =='metfacesmall' or self.outclass =='valsunchurch' or self.outclass =='disney':
                 ckpt = ckpt["g_ema"]
             else:
-                self.latent_avg = ckpt["latent_avg"].to(self.device)
-                ckpt = ckpt["g_ema"]
+                #self.latent_avg = ckpt["latent_avg"].to(self.device)
+                if "G_ema" in ckpt.keys():
+                    ckpt = ckpt['G_ema']
+                elif "g_ema" in ckpt.keys():
+                    ckpt = ckpt['g_ema']
+                else:
+                    ckpt = ckpt['G']
 
             self.model.load_state_dict(ckpt, strict=False)
             self.save_block = ''
@@ -312,10 +336,13 @@ class StyleGAN2Generator(Generator):
     def custom_partial_forward(self, x, layer_name):
         self.model.synthesis.block_out = layer_name
         if self.w_primary:
-            return self.model.synthesis(self.model.mapping.forward_w_broadcast(x), block_out=layer_name)
+            ret =  self.model.synthesis(self.model.mapping.forward_w_broadcast(x), block_out=layer_name)
+        else:
+            ret = self.model(x, c=None, block_out=layer_name)
 
+        if layer_name == "full": ret = 0.5 * (ret + 1)
 
-        return self.model(x, c=None, block_out=layer_name)
+        return ret
 
 
 
@@ -398,14 +425,10 @@ class StyleGAN2Generator(Generator):
 
         #import pdb; pdb.set_trace()
         if "full" == layer_name:
-            return skip
+            return 0.5 * (skip + 1) 
 
         raise RuntimeError(f"Layer {layer_name} not encountered in partial_forward")
-        '''outimg = ((skip + 1)/2).clip(0,1)
-        os.chdir("/usr/WS2/olson60/research/latentclr/")
-        from torchvision.utils import save_image
-        from torchvision.utils import make_grid
-        save_image(make_grid(outimg.cpu().detach()),"test.png")'''
+       
 
     def set_noise_seed(self, seed):
         torch.manual_seed(seed)

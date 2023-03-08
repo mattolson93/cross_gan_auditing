@@ -30,11 +30,11 @@ class Visualizer:
         self,
         model: torch.nn.Module,
         generator: Generator,
-        projector: torch.nn.Module,
         device: torch.device,
         n_samples: Union[int, str],
         n_dirs: Union[int, List[int]],
         alphas: List[int],
+        projector: torch.nn.Module = None,
         iterative: bool = True,
         feed_layers: Optional[List[int]] = None,
         image_size: Optional[Union[int, List[int]]] = None,
@@ -52,12 +52,11 @@ class Visualizer:
 
         # Set to eval
         self.generator.eval()
-        self.projector.eval()
         self.model.eval()
 
         # N Samples
         if isinstance(n_samples, int):
-            self.samples = self.generator.sample_latent(n_samples)
+            self.samples = self.generator.sample_latent(n_samples, seed=0)
             self.samples = self.samples.to(self.device)
         else:
             print(f"Loading input file {n_samples}...")
@@ -95,7 +94,7 @@ class Visualizer:
         # Feed Layers
         self.feed_layers = feed_layers
 
-    def visualize(self) -> float:
+    def visualize(self, clamp_val=None) -> float:
         """Generates images from the trained model
 
         Returns:
@@ -108,7 +107,6 @@ class Visualizer:
 
         # Set to eval
         self.generator.eval()
-        self.projector.eval()
         self.model.eval()
 
         #  Helper function to edit latent codes
@@ -129,7 +127,7 @@ class Visualizer:
             return zs
 
         # Helper function to generate images
-        def _generate(zs, z=None):
+        def _generate(zs, z=None, get_w=False):
             # Manipulate only asked layers
             if self.feed_layers is not None and z is not None:
                 n_latent = self.generator.n_latent()
@@ -141,19 +139,21 @@ class Visualizer:
                     else:
                         zs_layers.append(z.expand(zs.shape[0], -1))
                 zs = zs_layers
-
+            zs = self.generator.truncate_w(zs, clamp_val) if clamp_val is not None else zs
             images = self.generator(zs).detach().cpu()
-            return self.image_transform(images)
+            if get_w: return torch.clamp(self.image_transform(images), min=0, max=1), zs
+            return torch.clamp(self.image_transform(images), min=0, max=1)
 
         # Loop
         with torch.no_grad():
+            ws = []
             for i in range(self.samples.shape[0]):
                 # Take a single sample
                 z = self.samples[i : i + 1, ...]
 
                 # Get original image
-                orj_img = _generate(z)
-
+                orj_img, w = _generate(z, get_w=True)
+                ws.append(w)
                 # Accumulator for images
                 images = []
 
@@ -250,9 +250,11 @@ class Visualizer:
                 imgs_grid = torch.cat([img_alpha, imgs_grid], dim=-2)
                 imgs_grid = torch.cat([img_k, imgs_grid], dim=-1)
 
-                torchvision.utils.save_image(imgs_grid, f"sample_{i}.png")
+                prefix = "" if clamp_val is None else f"t{clamp_val}_"
+                torchvision.utils.save_image(imgs_grid, f"{prefix}sample_{i}.png")
 
                 # Update progress bar
                 pbar.update()
 
+        #breakpoint()
         pbar.close()
