@@ -1,11 +1,11 @@
 import hydra
 from omegaconf import DictConfig
 
-import colat2.runner as runner
-import colat2.utils.log_utils as utils
+import colat3.runner as runner
+import colat3.utils.log_utils as utils
 
 
-@hydra.main(config_path="conf", config_name="train2")
+@hydra.main(config_path="conf", config_name="train3")
 def train(cfg: DictConfig):
     
     utils.display_config(cfg)
